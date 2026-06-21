@@ -99,26 +99,27 @@ def sample_concepts():
 def sample_news_items():
     """测试用新闻条目"""
     from src.infrastructure.rss_fetcher import NewsItem
+    from datetime import datetime
     return [
         NewsItem(
+            article_id="https://example.com/news/1",
             title="固态电池量产突破：宁德时代宣布良率达95%",
             summary="宁德时代在固态电池领域取得重大突破，量产良率达到95%。",
-            url="https://example.com/news/1",
-            published="2026-06-20T10:00:00",
+            pub_time=datetime(2026, 6, 20, 10, 0, 0),
             source="财联社",
         ),
         NewsItem(
+            article_id="https://example.com/news/2",
             title="央行宣布降准50个基点",
             summary="中国人民银行决定下调金融机构存款准备金率0.5个百分点。",
-            url="https://example.com/news/2",
-            published="2026-06-20T14:00:00",
+            pub_time=datetime(2026, 6, 20, 14, 0, 0),
             source="财联社",
         ),
         NewsItem(
+            article_id="https://example.com/news/3",
             title="某公司年报预告大幅增长",
             summary="某上市公司发布年报预告，净利润同比增长200%。",
-            url="https://example.com/news/3",
-            published="2026-06-20T16:00:00",
+            pub_time=datetime(2026, 6, 20, 16, 0, 0),
             source="财联社",
         ),
     ]

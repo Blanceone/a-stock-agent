@@ -83,8 +83,10 @@ class TestTechRanker:
 
         np.random.seed(42)
         n = 60
+        dates = pd.date_range("2026-01-01", periods=n, freq="B")
         close = np.linspace(10, 15, n)  # 稳定上升趋势
         df = pd.DataFrame({
+            "trade_date": dates.strftime("%Y%m%d"),
             "close": close,
             "vol": np.ones(n) * 500000,
         })

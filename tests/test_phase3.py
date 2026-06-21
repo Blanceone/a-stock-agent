@@ -115,15 +115,16 @@ class TestRSSDedup:
     def test_news_item_creation(self):
         """NewsItem 创建"""
         from src.infrastructure.rss_fetcher import NewsItem
+        from datetime import datetime
         item = NewsItem(
+            article_id="https://example.com/1",
             title="测试新闻",
             summary="测试摘要",
-            url="https://example.com/1",
-            published="2026-06-20T10:00:00",
+            pub_time=datetime(2026, 6, 20, 10, 0, 0),
             source="test",
         )
         assert item.title == "测试新闻"
-        assert item.url == "https://example.com/1"
+        assert item.article_id == "https://example.com/1"
 
     def test_dedup_key_format(self):
         """去重 Key 格式正确"""

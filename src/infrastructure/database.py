@@ -92,29 +92,104 @@ def _init_postgres() -> psycopg2.pool.SimpleConnectionPool:
 
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────────
-def _init_chromadb() -> tuple[chromadb.HttpClient, chromadb.Collection]:
+def _init_chromadb() -> tuple:
+    """初始化 ChromaDB 连接，兼容不同版本的服务端。"""
     from chromadb.utils import embedding_functions
 
     logger.info("[DB] 初始化 ChromaDB: {}:{}", settings.chromadb_host, settings.chromadb_port)
-    client = chromadb.HttpClient(
-        host=settings.chromadb_host,
-        port=settings.chromadb_port,
-    )
 
-    # 使用 bge-small-zh-v1.5；若本地未下载则自动从 HuggingFace 下载
+    client = None
+    # 尝试新版 HttpClient (1.x 客户端)
+    try:
+        client = chromadb.HttpClient(
+            host=settings.chromadb_host,
+            port=settings.chromadb_port,
+        )
+        # 验证连接
+        client.heartbeat()
+    except Exception as e1:
+        logger.warning("[DB] ChromaDB HttpClient 连接失败: {}，尝试兼容模式", e1)
+        # 降级：使用 REST API 直接通信
+        try:
+            import requests
+            base_url = f"http://{settings.chromadb_host}:{settings.chromadb_port}"
+            resp = requests.get(f"{base_url}/api/v1/heartbeat", timeout=5)
+            if resp.ok:
+                logger.info("[DB] ChromaDB v0.x 服务端在线，使用兼容模式")
+                # 创建简化包装器
+                client = _ChromaDBCompat(base_url)
+            else:
+                raise Exception(f"heartbeat 返回 {resp.status_code}")
+        except Exception as e2:
+            logger.error("[DB] ChromaDB 完全不可用: {}", e2)
+            return None, None
+
+    # 使用 bge-small-zh-v1.5
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="BAAI/bge-small-zh-v1.5",
         cache_folder=settings.embedding_model_path,
     )
 
-    collection = client.get_or_create_collection(
-        name=settings.chroma_collection_name,
-        embedding_function=ef,
-        metadata={"hnsw:space": "cosine"},
-    )
-    logger.info("[DB] ChromaDB collection '{}' 就绪，当前数量: {}",
-                settings.chroma_collection_name, collection.count())
+    try:
+        collection = client.get_or_create_collection(
+            name=settings.chroma_collection_name,
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info("[DB] ChromaDB collection '{}' 就绪，当前数量: {}",
+                    settings.chroma_collection_name, collection.count())
+    except Exception as e:
+        logger.warning("[DB] ChromaDB collection 创建失败: {}，语义搜索不可用", e)
+        collection = None
+
     return client, collection
+
+
+class _ChromaDBCompat:
+    """ChromaDB v0.x 兼容包装器，通过 REST API 直接通信。"""
+    def __init__(self, base_url: str):
+        import requests
+        self._base = base_url
+        self._session = requests.Session()
+
+    def heartbeat(self):
+        resp = self._session.get(f"{self._base}/api/v1/heartbeat", timeout=5)
+        return resp.json()
+
+    def get_or_create_collection(self, name, embedding_function=None, metadata=None):
+        """获取或创建 collection（简化实现）"""
+        import requests
+        # 先尝试获取
+        resp = self._session.get(f"{self._base}/api/v1/collections/{name}", timeout=5)
+        if resp.ok:
+            return _CollectionCompat(self._base, name, self._session)
+        # 不存在则创建
+        resp = self._session.post(
+            f"{self._base}/api/v1/collections",
+            json={"name": name, "metadata": metadata or {}},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return _CollectionCompat(self._base, name, self._session)
+
+
+class _CollectionCompat:
+    """ChromaDB v0.x Collection 兼容包装器。"""
+    def __init__(self, base_url: str, name: str, session):
+        self._base = base_url
+        self.name = name
+        self._session = session
+
+    def count(self):
+        try:
+            resp = self._session.get(
+                f"{self._base}/api/v1/collections/{self.name}/count", timeout=5
+            )
+            if resp.ok:
+                return resp.json()
+        except Exception:
+            pass
+        return 0
 
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
@@ -131,11 +206,18 @@ def init_all() -> None:
     """
     启动时调用一次，初始化所有连接并完成建表 DDL。
     初始化结果写入模块级单例，其他模块通过 get_pg_conn / redis_client 等访问。
+    ChromaDB 不可用时不会崩溃，语义搜索功能降级。
     """
     global pg_pool, chroma_client, chroma_collection, redis_client
 
     pg_pool = _init_postgres()
-    chroma_client, chroma_collection = _init_chromadb()
+
+    try:
+        chroma_client, chroma_collection = _init_chromadb()
+    except Exception as e:
+        logger.warning("[DB] ChromaDB 初始化失败: {}，语义搜索不可用", e)
+        chroma_client, chroma_collection = None, None
+
     redis_client = _init_redis()
 
     logger.info("[DB] 全部基础设施初始化完成")

@@ -36,22 +36,18 @@ CREATE INDEX IF NOT EXISTS idx_stock_basic_mv ON stock_basic(circ_mv);
 
 CREATE TABLE IF NOT EXISTS sop_pending (
     id             SERIAL PRIMARY KEY,
-    concept        VARCHAR(100),
-    viewpoint      TEXT        NOT NULL,
-    conditions     TEXT        NOT NULL,
-    scenarios      TEXT,
-    source_url     TEXT,
-    conflicts_with INTEGER[],
+    graph_json     JSONB       NOT NULL,          -- V4-Flash 提取的 SOP 操作图谱
+    source_text    TEXT        NOT NULL,          -- 原始政策文本片段
+    status         VARCHAR(20) DEFAULT 'pending', -- pending/processed
     created_at     TIMESTAMP   DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS sop_active (
     id             SERIAL PRIMARY KEY,
-    concept        VARCHAR(100),
-    viewpoint      TEXT        NOT NULL,
-    conditions     TEXT        NOT NULL,
-    scenarios      TEXT,
-    source_url     TEXT,
+    sop_name       VARCHAR(200) NOT NULL,         -- SOP 名称
+    policy_name    VARCHAR(200),                  -- 关联政策名称
+    graph_json     JSONB       NOT NULL,          -- 审批通过的 SOP 操作图谱
+    approved       BOOLEAN     DEFAULT FALSE,     -- 人工审核状态
     approved_by    VARCHAR(50),
     approved_at    TIMESTAMP   DEFAULT NOW()
 );

@@ -5,6 +5,7 @@ main.py — A股宏观锚定投研智能体 系统入口
   python main.py --mode static --pdf <policy_pdf_path>   # 静态图谱构建
   python main.py --mode dynamic                          # 动态监控（定时任务）
   python main.py --mode init                             # 初始化基础设施（建表、全A股入库）
+  python main.py --mode semantic                         # 语义知识库初始化（主营业务向量化入库）
 """
 from __future__ import annotations
 
@@ -137,11 +138,23 @@ def run_init() -> None:
         release_pg_conn(conn)
 
 
+def run_semantic() -> None:
+    """语义知识库初始化：主营业务文本 → V4-Flash 摘要 → ChromaDB 向量化"""
+    from src.infrastructure.database import init_all
+    from src.infrastructure.semantic_init import run as semantic_run
+
+    init_all()
+    logger.info("[Main] 启动语义知识库初始化")
+
+    stats = semantic_run()
+    logger.info("[Main] 语义知识库初始化完成: {}", stats)
+
+
 def main():
     parser = argparse.ArgumentParser(description="A股宏观锚定投研智能体")
     parser.add_argument(
-        "--mode", required=True, choices=["static", "dynamic", "init"],
-        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库"
+        "--mode", required=True, choices=["static", "dynamic", "init", "semantic"],
+        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库, semantic=语义知识库"
     )
     parser.add_argument("--pdf", type=str, default="", help="政策PDF路径（static模式）")
     args = parser.parse_args()
@@ -154,6 +167,8 @@ def main():
         asyncio.run(run_dynamic())
     elif args.mode == "init":
         run_init()
+    elif args.mode == "semantic":
+        run_semantic()
 
 
 if __name__ == "__main__":

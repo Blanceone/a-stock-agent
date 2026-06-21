@@ -16,13 +16,15 @@ resonance_alert.py — 步骤6：三共振条件触发与预警
 """
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime
 
-import pandas as pd
 from loguru import logger
 
 from config.settings import settings
 from src.infrastructure.data_fetcher import fetch_moneyflow_intraday
+from src.infrastructure.database import redis_client
 from src.tools.indicator_calc import calc_volume_ratio
 
 
@@ -32,24 +34,14 @@ def _check_capital_flow(ts_code: str) -> dict:
     返回 {"inflow_pct": float, "net_buy_amt": float, "source": str}
     """
     try:
-        df = fetch_moneyflow_intraday(ts_code)
-        if df.empty:
-            return {"inflow_pct": 0, "net_buy_amt": 0, "source": "empty"}
-
-        # a-stock-data 字段: buy_lg_amount(大单买入), sell_lg_amount(大单卖出)
-        #                  buy_elg_amount(特大单买入), sell_elg_amount(特大单卖出)
-        if "buy_lg_amount" in df.columns:
-            net_buy = (df["buy_lg_amount"].sum() + df.get("buy_elg_amount", pd.Series([0])).sum()
-                       - df["sell_lg_amount"].sum() - df.get("sell_elg_amount", pd.Series([0])).sum())
-        else:
-            net_buy = 0
-
-        turnover = df.get("trade_amount", pd.Series([1])).sum()
-        inflow_pct = net_buy / max(turnover, 1) * 100
+        data = fetch_moneyflow_intraday(ts_code)
+        # fetch_moneyflow_intraday 返回 dict: {ts_code, net_inflow, net_inflow_pct, timestamp}
+        net_inflow = data.get("net_inflow", 0)
+        net_inflow_pct = data.get("net_inflow_pct", 0)
 
         return {
-            "inflow_pct": round(inflow_pct, 2),
-            "net_buy_amt": round(net_buy, 0),
+            "inflow_pct": round(net_inflow_pct, 2),
+            "net_buy_amt": round(net_inflow, 0),
             "source": "a-stock-data",
         }
     except Exception as e:
@@ -67,7 +59,8 @@ def _check_volume_ratio(ts_code: str) -> float:
         df = fetch_daily(ts_code, start_date, end_date)
         if df.empty or len(df) < 10:
             return 0
-        return calc_volume_ratio(df)
+        df = calc_volume_ratio(df)  # 返回 DataFrame 追加 vol_ratio 列
+        return float(df.iloc[-1].get("vol_ratio", 0))
     except Exception as e:
         logger.warning("[resonance] 量比计算失败 ts_code={} reason={}", ts_code, e)
         return 0
@@ -126,6 +119,18 @@ def run(state: dict) -> dict:
 
     if not alerts:
         logger.info("[resonance] 无三共振信号")
+
+    # 持久化到 Redis: dynamic:alerts:{date}
+    if alerts and redis_client is not None:
+        try:
+            today = datetime.now().strftime("%Y%m%d")
+            key = f"dynamic:alerts:{today}"
+            for alert in alerts:
+                redis_client.lpush(key, json.dumps(alert, ensure_ascii=False))
+            redis_client.expire(key, 86400 * 3)  # 保3天
+            logger.debug("[resonance] {} 条预警已写入 Redis {}", len(alerts), key)
+        except Exception as e:
+            logger.warning("[resonance] Redis 写入失败: {}", e)
 
     return {
         "resonance_alerts": alerts,

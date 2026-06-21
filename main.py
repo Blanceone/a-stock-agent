@@ -95,6 +95,20 @@ async def run_dynamic() -> None:
         day_of_week="mon-fri", hour=15, minute=30
     ))
 
+    # SOP 自学习：周日 02:00
+    async def sop_learning_job():
+        logger.info("[Scheduler] sop_learning_job 触发")
+        from src.nodes.sop_learner import run as sop_run
+        try:
+            result = sop_run({})
+            logger.info("[Main] SOP 学习完成: {} 条", result.get("sop_processed", 0))
+        except Exception as e:
+            logger.warning("[Main] SOP 学习失败: {}", e)
+
+    scheduler.add_job(sop_learning_job, CronTrigger(
+        day_of_week="sun", hour=2, minute=0
+    ))
+
     scheduler.start()
     logger.info("[Main] 动态监控已启动，按 Ctrl+C 停止")
     try:

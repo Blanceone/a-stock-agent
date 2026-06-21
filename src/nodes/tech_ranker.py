@@ -11,12 +11,14 @@ tech_ranker.py — 步骤4：技术面多因子打分与梯队排序
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 from loguru import logger
 
 from config.settings import settings
 from src.infrastructure.data_fetcher import fetch_daily
+from src.infrastructure.database import redis_client
 from src.tools.indicator_calc import calc_all
 
 
@@ -96,8 +98,18 @@ def run(state: dict) -> dict:
     tier2.sort(key=lambda x: x["score"], reverse=True)
 
     logger.info("[tech_ranker] 第一梯队 {} 只, 第二梯队 {} 只", len(tier1), len(tier2))
+
+    # 持久化到 Redis，供 dynamic_graph 读取
+    ranked = {"tier1": tier1, "tier2": tier2}
+    if redis_client is not None:
+        try:
+            redis_client.set("static:stock_pool", json.dumps(ranked, ensure_ascii=False), ex=86400 * 7)
+            logger.debug("[tech_ranker] stock_pool 已写入 Redis")
+        except Exception as e:
+            logger.warning("[tech_ranker] Redis 写入失败: {}", e)
+
     return {
-        "ranked_stocks": {"tier1": tier1, "tier2": tier2},
+        "ranked_stocks": ranked,
         "error_node": None,
         "error_msg": None,
     }

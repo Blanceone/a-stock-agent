@@ -29,41 +29,67 @@ def run_static(pdf_path: str) -> None:
     from src.infrastructure.database import init_all
     init_all()
 
+    from src.graphs.static_graph import run_static_pipeline
     logger.info("[Main] 启动静态图谱构建: {}", pdf_path)
-    # TODO: 调用 build_static_graph().invoke(...)
-    logger.warning("[Main] static_graph 尚未实现，请先完成 nodes/ 模块")
+
+    final_state = run_static_pipeline(pdf_path)
+
+    tier1 = final_state.get("ranked_stocks", {}).get("tier1", [])
+    tier2 = final_state.get("ranked_stocks", {}).get("tier2", [])
+    logger.info("[Main] ===== 静态图谱结果 =====")
+    logger.info("[Main] 第一梯队 ({} 只):", len(tier1))
+    for s in tier1:
+        logger.info("  {} {} | score={:.3f} | {}", s["ts_code"], s["name"], s["score"], s["reason"])
+    logger.info("[Main] 第二梯队 ({} 只):", len(tier2))
+    for s in tier2:
+        logger.info("  {} {} | score={:.3f} | {}", s["ts_code"], s["name"], s["score"], s["reason"])
+
+
+# ── 概念词库持久化（内存共享）─────────────────────────────────────────────────
+_shared_concepts: list[dict] = []
 
 
 async def run_dynamic() -> None:
     """动态监控流水线（APScheduler 定时任务）"""
+    global _shared_concepts
     from src.infrastructure.database import init_all
     init_all()
 
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
+    from src.graphs.dynamic_graph import process_news_item
+    from src.infrastructure.rss_fetcher import poll_rss
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
 
-    # 新闻轮询：每分钟
-    async def rss_and_funnel_job():
-        logger.debug("[Scheduler] rss_and_funnel_job 触发")
-        # TODO: 实现 news_funnel 逻辑
-
-    # 三共振检测：工作日 9:30-15:00 每10分钟
-    async def resonance_check_job():
-        logger.debug("[Scheduler] resonance_check_job 触发")
-        # TODO: 实现 resonance_alert 逻辑
+    # RSS 轮询 → 动态流水线
+    async def rss_pipeline_job():
+        global _shared_concepts
+        async for news_item in poll_rss():
+            result = process_news_item(news_item, _shared_concepts)
+            if result.get("concepts_updated"):
+                _shared_concepts = result["concepts_updated"]
+            for alert in result.get("resonance_alerts", []):
+                logger.warning(
+                    "🚨 [预警] {} | {} | 消息{:.2f} 资金{:.1f}% 量比{:.1f}",
+                    alert["ts_code"], alert["news_title"],
+                    alert["news_score"], alert["capital_inflow_pct"],
+                    alert["volume_ratio"],
+                )
 
     # 盘后龙虎榜：工作日 15:30
     async def top_list_update_job():
         logger.debug("[Scheduler] top_list_update_job 触发")
-        # TODO: 实现 top_list 更新逻辑
+        from datetime import datetime
+        from src.infrastructure.data_fetcher import fetch_top_list
+        try:
+            df = fetch_top_list(datetime.now().strftime("%Y%m%d"))
+            logger.info("[Main] 龙虎榜更新: {} 条记录", len(df))
+        except Exception as e:
+            logger.warning("[Main] 龙虎榜更新失败: {}", e)
 
-    scheduler.add_job(rss_and_funnel_job, IntervalTrigger(minutes=1))
-    scheduler.add_job(resonance_check_job, CronTrigger(
-        day_of_week="mon-fri", hour="9-14", minute="*/10"
-    ))
+    scheduler.add_job(rss_pipeline_job, IntervalTrigger(minutes=1))
     scheduler.add_job(top_list_update_job, CronTrigger(
         day_of_week="mon-fri", hour=15, minute=30
     ))

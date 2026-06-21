@@ -1,0 +1,43 @@
+# LLM & 工作流
+langchain==0.2.16
+langchain-openai==0.1.25
+langgraph==0.2.28
+openai==1.45.0
+
+# 数据接口
+tushare==1.4.20
+akshare==1.14.0
+
+# 数据库
+psycopg2-binary==2.9.9
+chromadb==0.5.15
+redis==5.0.8
+
+# 向量嵌入（本地 bge-small-zh-v1.5）
+FlagEmbedding==1.2.11
+torch>=2.0.0
+
+# 数值计算
+pandas==2.2.2
+numpy==1.26.4
+
+# Web 抓取
+playwright==1.46.0
+requests==2.32.3
+feedparser==6.0.11
+
+# PDF 解析
+PyMuPDF==1.24.9
+
+# 调度
+APScheduler==3.10.4
+
+# 工具
+python-dotenv==1.0.1
+loguru==0.7.2
+pydantic==2.8.2
+pydantic-settings==2.5.2
+beautifulsoup4==4.12.3
+
+# 测试
+pytest==8.3.3

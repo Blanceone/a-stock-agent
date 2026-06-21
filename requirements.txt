@@ -39,5 +39,9 @@ pydantic==2.8.2
 pydantic-settings==2.5.2
 beautifulsoup4==4.12.3
 
+# Web API
+fastapi==0.115.0
+uvicorn==0.30.6
+
 # 测试
 pytest==8.3.3

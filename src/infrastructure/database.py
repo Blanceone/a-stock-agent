@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS sop_active (
     graph_json     JSONB       NOT NULL,          -- 审批通过的 SOP 操作图谱
     approved       BOOLEAN     DEFAULT FALSE,     -- 人工审核状态
     approved_by    VARCHAR(50),
-    approved_at    TIMESTAMP   DEFAULT NOW()
+    approved_at    TIMESTAMP   DEFAULT NOW(),
+    created_at     TIMESTAMP   DEFAULT NOW()      -- 记录创建时间
 );
 """
 
@@ -101,6 +102,17 @@ def _init_postgres() -> psycopg2.pool.SimpleConnectionPool:
         with conn.cursor() as cur:
             cur.execute(_DDL)
         conn.commit()
+        # 补丁：为已有表添加缺失列（单独事务，避免已存在时报错）
+        _patch_sqls = [
+            "ALTER TABLE sop_active ADD COLUMN created_at TIMESTAMP DEFAULT NOW()",
+        ]
+        for sql in _patch_sqls:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                conn.commit()
+            except Exception:
+                conn.rollback()
         logger.info("[DB] PostgreSQL 表结构初始化完成")
     finally:
         pool.putconn(conn)

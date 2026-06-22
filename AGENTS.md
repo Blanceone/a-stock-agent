@@ -63,6 +63,7 @@ a_stock_agent/
 │   └── tools/
 │       └── indicator_calc.py   # 技术指标硬计算（禁止 LLM 替代）
 ├── scripts/                    # 运维/部署/诊断脚本
+│   └── view_output.py          # 系统输出查看器（交互式菜单）
 ├── tests/                      # 测试套件（90 个用例）
 │   ├── conftest.py             # 共享 fixtures
 │   ├── test_phase1.py          # Phase 1: 配置 + 指标 + 降级链 + DDL
@@ -72,15 +73,49 @@ a_stock_agent/
 │   ├── test_e2e.py             # E2E 集成测试（25 个，含真实 LLM/API 调用）
 │   └── test_full_chain.py      # 全业务链路测试（9 个，端到端 DAG 执行）
 ├── api.py                      # FastAPI SOP 审核接口
+├── start.bat                   # 一键启动控制面板（双击运行）
 ├── main.py                     # 系统入口（4 种运行模式）
 └── .env                        # 环境变量（不提交 Git）
 ```
 
 ---
 
+## 一键启动
+
+双击 `start.bat` 进入控制面板，提供交互式菜单：
+
+```
+  ╔═══════════════════════════════════════════════╗
+  ║       A股宏观锚定投研智能体 - 控制面板        ║
+  ╠═══════════════════════════════════════════════╣
+  ║   [1] 一键启动（完整模式）                    ║
+  ║       SSH隧道 + 动态监控 + API服务            ║
+  ║   [2] 首次初始化                              ║
+  ║       SSH隧道 + 建表 + 全A股入库              ║
+  ║   [3] 语义知识库初始化                        ║
+  ║   [4] 仅启动动态监控                          ║
+  ║   [5] 构建静态图谱（需政策PDF）               ║
+  ║   [6] 启动 SOP 审核平台（API Server）         ║
+  ║   [7] 运行测试套件                            ║
+  ║   [8] 查看系统输出                            ║
+  ╚═══════════════════════════════════════════════╝
+```
+
+**首次使用流程**：选 [2] 初始化 → 选 [3] 语义初始化 → 选 [1] 一键启动
+
+**一键启动（选项 1）会同时拉起**：
+- SSH 隧道（新窗口，转发 PG/Redis/ChromaDB 端口）
+- FastAPI SOP 审核平台（新窗口，`http://localhost:8088`）
+- 动态监控流水线（当前窗口，Ctrl+C 停止）
+
+---
+
 ## 常用命令
 
 ```bash
+# 一键启动（推荐 Windows 用户双击 start.bat）
+start.bat
+
 # 初始化基础设施（建表 + 全 A 股入库）
 python main.py --mode init
 
@@ -95,6 +130,9 @@ python main.py --mode semantic
 
 # 启动 SOP 审核 Web API
 uvicorn api:app --host 0.0.0.0 --port 8088
+
+# 查看系统输出数据
+python scripts/view_output.py
 
 # 运行全部测试（90 个用例）
 pytest tests/ -v
@@ -230,6 +268,117 @@ git push
 | FC-3 | 新闻 → Flash粗筛 → Pro深读 → 三共振检查 → SOP学习 | 完整动态 DAG |
 | FC-4 | sop_pending → LLM提取 → sop_active(approved=FALSE) → API查询 | SOP 全生命周期 |
 | FC-5 | tech_ranker→Redis, 预警存储, LLM缓存共享 | 跨管道数据流 |
+
+---
+
+## 软件输出
+
+系统运行后的输出数据分为 4 类，可通过 **SOP 审核平台 Web UI**、**输出查看器**、**命令行工具**三种方式查看。
+
+### 查看方式
+
+| 方式 | 入口 | 适用场景 |
+|------|------|----------|
+| SOP 审核平台 | `http://localhost:8088` | 审核 SOP、查看预警（需 API 服务运行） |
+| 输出查看器 | `python scripts/view_output.py` | 交互式查看全部输出（直连 PG/Redis） |
+| start.bat [8] | 双击 `start.bat` 选 8 | 菜单式快捷查看 |
+| API 接口 | curl / 浏览器 | 程序化访问 |
+
+### 1. 三共振预警信号
+
+动态监控检测到消息面 + 资金面 + 量比三重共振时，输出预警。
+
+| 存储 | Key / 表 | 说明 |
+|------|----------|------|
+| Redis | `dynamic:alerts:{YYYYMMDD}` | 当日预警列表（JSON，TTL 3天） |
+| 控制台 | `🚨 [RESONANCE ALERT]` | 实时日志输出 |
+| API | `GET /alerts/today` | JSON 格式返回 |
+
+每条预警包含：`ts_code`、`news_title`、`news_score`、`capital_inflow_pct`、`volume_ratio`、`timestamp`
+
+```bash
+# 查看今日预警
+python scripts/view_output.py alerts
+
+# API 访问
+curl http://localhost:8088/alerts/today
+```
+
+### 2. 静态图谱股池
+
+静态图谱构建完成后，输出产业链相关的排名股池。
+
+| 存储 | Key / 表 | 说明 |
+|------|----------|------|
+| Redis | `static:stock_pool` | tier1 + tier2 排名股池（JSON，TTL 7天） |
+| 控制台 | `[Main] 静态图谱结果` | 实时日志输出 |
+
+每只股票包含：`ts_code`、`name`、`score`、`is_ma_bullish`、`vol_ratio`、`reason`
+
+```bash
+# 查看股池
+python scripts/view_output.py stockpool
+```
+
+### 3. SOP 战法（自学习输出）
+
+动态监控从新闻中自动提取交易战法，经人工审核后生效。
+
+| 存储 | 表 | 说明 |
+|------|------|------|
+| PostgreSQL | `sop_pending` | 待审核原始战法（status=pending） |
+| PostgreSQL | `sop_active` | 已提取战法（approved=FALSE 待批准，TRUE 已生效） |
+| API | `GET /sop/pending` | 待审核列表 |
+| API | `GET /sop/active` | 已审核列表 |
+| Web UI | `http://localhost:8088` | 可视化审核（通过/拒绝按钮） |
+
+```bash
+# 查看待审核
+python scripts/view_output.py sop-pending
+
+# 查看已审核
+python scripts/view_output.py sop-active
+
+# API 审核通过
+curl -X POST http://localhost:8088/sop/approve/1 -H 'Content-Type: application/json' -d '{"approved_by":"admin"}'
+```
+
+### 4. 系统运行统计
+
+查看基础设施中的数据量、缓存、状态概览。
+
+```bash
+# 查看系统统计
+python scripts/view_output.py stats
+```
+
+输出示例：
+```
+  PostgreSQL:
+    stock_basic:  5307 条 (活跃 5102, ST/退市 205)
+    sop_pending:  3 条待审核
+    sop_active:   5 条 (2 已批准, 3 待批准)
+
+  ChromaDB:
+    stock_business: 4823 条向量化记录
+
+  Redis:
+    LLM 缓存:      127 条
+    今日预警:      2 条
+    静态图谱结果:  有
+```
+
+### 控制台日志标识
+
+| 日志前缀 | 含义 |
+|----------|------|
+| `[Main]` | 主进程输出 |
+| `[StaticGraph]` | 静态 DAG 执行日志 |
+| `[DynamicGraph]` | 动态 DAG 执行日志 |
+| `[Scheduler]` | APScheduler 定时任务触发 |
+| `🚨 [RESONANCE ALERT]` | 三共振预警信号 |
+| `[SOP]` | SOP 审核操作日志 |
+| `[DB]` | 数据库初始化/连接日志 |
 
 ---
 

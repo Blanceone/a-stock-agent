@@ -14,7 +14,7 @@ chromadb==0.5.15
 redis==5.0.8
 
 # 向量嵌入（本地 bge-small-zh-v1.5）
-FlagEmbedding==1.2.11
+FlagEmbedding==1.4.0
 torch>=2.0.0
 
 # 数值计算

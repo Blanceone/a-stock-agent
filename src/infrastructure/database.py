@@ -62,10 +62,26 @@ redis_client: Optional[redis.Redis] = None
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 def get_pg_conn() -> psycopg2.extensions.connection:
-    """从连接池取出一条连接，使用完毕需调用 release_pg_conn 归还。"""
+    """从连接池取出一条连接，使用完毕需调用 release_pg_conn 归还。
+    如果连接已断开，自动重试新建连接。"""
     if pg_pool is None:
         raise RuntimeError("PostgreSQL 连接池未初始化，请先调用 init_all()")
-    return pg_pool.getconn()
+    for attempt in range(3):
+        conn = pg_pool.getconn()
+        try:
+            # 快速验证连接是否存活
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return conn
+        except Exception:
+            # 连接已断开，关闭并丢弃，下次循环会获取新连接
+            try:
+                conn.close()
+            except Exception:
+                pass
+            pg_pool.putconn(conn, close=True)
+            logger.warning("[DB] PG 连接已断开，重试 ({}/3)", attempt + 1)
+    raise RuntimeError("PostgreSQL 连接池无法获取有效连接")
 
 
 def release_pg_conn(conn: psycopg2.extensions.connection) -> None:
@@ -77,7 +93,7 @@ def release_pg_conn(conn: psycopg2.extensions.connection) -> None:
 def _init_postgres() -> psycopg2.pool.SimpleConnectionPool:
     logger.info("[DB] 初始化 PostgreSQL 连接池: {}", settings.pg_dsn[:40] + "...")
     pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=2, maxconn=10, dsn=settings.pg_dsn
+        minconn=1, maxconn=10, dsn=settings.pg_dsn
     )
     # 执行建表
     conn = pool.getconn()
@@ -124,11 +140,16 @@ def _init_chromadb() -> tuple:
             logger.error("[DB] ChromaDB 完全不可用: {}", e2)
             return None, None
 
-    # 使用 bge-small-zh-v1.5
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="BAAI/bge-small-zh-v1.5",
-        cache_folder=settings.embedding_model_path,
-    )
+    # 使用 bge-small-zh-v1.5（优先使用本地模型路径）
+    model_path = settings.embedding_model_path
+    try:
+        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=model_path,
+        )
+        logger.info("[DB] Embedding 模型已加载: {}", model_path)
+    except Exception as ef_err:
+        logger.warning("[DB] Embedding 模型加载失败: {}，使用默认", ef_err)
+        ef = embedding_functions.DefaultEmbeddingFunction()
 
     try:
         collection = client.get_or_create_collection(
@@ -157,12 +178,13 @@ class _ChromaDBCompat:
         return resp.json()
 
     def get_or_create_collection(self, name, embedding_function=None, metadata=None):
-        """获取或创建 collection（简化实现）"""
-        import requests
+        """获取或创建 collection（返回 UUID 用于后续 API 调用）"""
         # 先尝试获取
         resp = self._session.get(f"{self._base}/api/v1/collections/{name}", timeout=5)
         if resp.ok:
-            return _CollectionCompat(self._base, name, self._session)
+            data = resp.json()
+            coll_id = data.get("id", name)
+            return _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
         # 不存在则创建
         resp = self._session.post(
             f"{self._base}/api/v1/collections",
@@ -170,26 +192,98 @@ class _ChromaDBCompat:
             timeout=5,
         )
         resp.raise_for_status()
-        return _CollectionCompat(self._base, name, self._session)
+        data = resp.json()
+        coll_id = data.get("id", name) if isinstance(data, dict) else name
+        return _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
 
 
 class _CollectionCompat:
     """ChromaDB v0.x Collection 兼容包装器。"""
-    def __init__(self, base_url: str, name: str, session):
+    def __init__(self, base_url: str, name: str, session, embedding_function=None, coll_id: str = ""):
         self._base = base_url
         self.name = name
+        self._id = coll_id or name  # UUID for API calls, fallback to name
         self._session = session
+        self._ef = embedding_function
 
     def count(self):
         try:
             resp = self._session.get(
-                f"{self._base}/api/v1/collections/{self.name}/count", timeout=5
+                f"{self._base}/api/v1/collections/{self._id}/count", timeout=5
             )
             if resp.ok:
                 return resp.json()
         except Exception:
             pass
         return 0
+
+    def add(self, ids, documents, metadatas=None, embeddings=None):
+        """添加文档（使用 embedding function 生成向量）"""
+        if embeddings is None and self._ef is not None:
+            try:
+                embeddings = self._ef(documents)
+            except Exception:
+                embeddings = None
+        payload = {"ids": ids, "documents": documents}
+        if metadatas:
+            payload["metadatas"] = metadatas
+        if embeddings is not None:
+            import numpy as np
+            if isinstance(embeddings, np.ndarray):
+                embeddings = embeddings.tolist()
+            elif isinstance(embeddings, list):
+                embeddings = [e.tolist() if isinstance(e, np.ndarray) else e for e in embeddings]
+            payload["embeddings"] = embeddings
+        resp = self._session.post(
+            f"{self._base}/api/v1/collections/{self._id}/add",
+            json=payload, timeout=30,
+        )
+        if not resp.ok:
+            logger.warning("[ChromaDB] add failed: {} {}", resp.status_code, resp.text[:200])
+        return resp.json() if resp.ok else None
+
+    def query(self, query_texts, n_results=10, where=None):
+        """查询文档"""
+        embeddings = None
+        if self._ef is not None:
+            try:
+                embeddings = self._ef(query_texts)
+            except Exception:
+                pass
+        payload = {"query_texts": query_texts, "n_results": n_results}
+        if embeddings is not None:
+            import numpy as np
+            if isinstance(embeddings, np.ndarray):
+                embeddings = embeddings.tolist()
+            elif isinstance(embeddings, list):
+                embeddings = [e.tolist() if isinstance(e, np.ndarray) else e for e in embeddings]
+            payload["query_embeddings"] = embeddings
+        if where:
+            payload["where"] = where
+        resp = self._session.post(
+            f"{self._base}/api/v1/collections/{self._id}/query",
+            json=payload, timeout=30,
+        )
+        if resp.ok:
+            return resp.json()
+        return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    def get(self, ids=None, where=None, include=None):
+        """获取文档（用于增量更新检查）"""
+        payload = {}
+        if ids:
+            payload["ids"] = ids
+        if where:
+            payload["where"] = where
+        if include:
+            payload["include"] = include
+        resp = self._session.post(
+            f"{self._base}/api/v1/collections/{self._id}/get",
+            json=payload, timeout=30,
+        )
+        if resp.ok:
+            return resp.json()
+        return {"ids": [], "metadatas": [], "documents": []}
 
 
 # ── Redis ─────────────────────────────────────────────────────────────────────

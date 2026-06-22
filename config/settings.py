@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     tushare_token: str = os.getenv("TUSHARE_TOKEN", "")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    searxng_url: str = os.getenv("SEARXNG_URL", "http://8.137.174.58:8080")
+    searxng_url: str = os.getenv("SEARXNG_URL", "http://8.137.174.58:8888")
     searxng_api_key: str = os.getenv("SEARXNG_API_KEY", "")
     rsshub_url: str = os.getenv("RSSHUB_URL", "http://8.137.174.58:1200")
     defuddle_service_url: str = os.getenv(

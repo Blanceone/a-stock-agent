@@ -82,8 +82,8 @@ def run(state: dict) -> dict:
                 "ts_code": ts_code,
                 "name": name_map.get(ts_code, ""),
                 "score": round(score, 3),
-                "is_ma_bullish": indicators["is_ma_bullish"],
-                "vol_ratio": round(indicators["latest_vol_ratio"], 2),
+                "is_ma_bullish": bool(indicators["is_ma_bullish"]),
+                "vol_ratio": round(float(indicators["latest_vol_ratio"]), 2),
                 "reason": _format_reason(indicators),
             }
 

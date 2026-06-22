@@ -19,6 +19,14 @@ from loguru import logger
 from config.settings import settings
 
 
+# ── 东财请求头（push2接口需要 UA+Referer，否则 RemoteDisconnected）──────────
+_EASTMONEY_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Referer": "https://quote.eastmoney.com/",
+}
+
+
 # ── 异常定义 ──────────────────────────────────────────────────────────────────
 class TushareQuotaError(Exception):
     """Tushare 积分不足"""
@@ -107,7 +115,7 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
             f"secid={market}.{code}&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57"
             f"&klt=101&fqt=1&beg={start_date}&end={end_date}"
         )
-        resp = requests.get(url, timeout=10).json()
+        resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
         rows = [r.split(",") for r in resp["data"]["klines"]]
         df = pd.DataFrame(rows, columns=["trade_date", "open", "close", "high",
                                           "low", "vol", "amount"])
@@ -131,7 +139,7 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         f"secid={market}.{code}"
         f"&fields=f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
     )
-    resp = requests.get(url, timeout=10).json()
+    resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
     data = resp.get("data", {})
     net_inflow = data.get("f62", 0) or 0
     net_inflow_pct = (data.get("f184", 0) or 0) / 100

@@ -12,21 +12,9 @@
 2. 每层列出具体节点（公司可以做的事），不写公司名
 3. 每个节点给出简短描述和关键词
 
-输出 JSON，格式：
-{
-  "concept": "具身智能",
-  "layers": [
-    {
-      "layer_name": "基础底座层",
-      "nodes": [
-        {
-          "node_name": "AI芯片设计",
-          "description": "用于具身智能感知与决策的专用芯片",
-          "keywords": ["GPU", "NPU", "算力"]
-        }
-      ]
-    }
-  ]
-}
-
-仅输出 JSON，不要解释。
+输出要求：
+- 必须且仅输出一个合法的 JSON 对象
+- 不要包含 markdown 标记（不要 ```json）
+- 不要包含任何额外文字或注释
+- JSON 格式如下：
+{{"concept": "{concept}", "layers": [{{"layer_name": "基础底座层", "nodes": [{{"node_name": "AI芯片设计", "description": "用于感知与决策的专用芯片", "keywords": ["GPU", "NPU", "算力"]}}]}}]}}

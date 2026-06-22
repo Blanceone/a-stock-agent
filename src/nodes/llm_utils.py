@@ -114,14 +114,53 @@ def call_llm_json(
         max_tokens=max_tokens,
         use_cache=use_cache,
     )
-    # 去掉 markdown code fence
+    return _parse_json(raw)
+
+
+def _parse_json(raw: str) -> Any:
+    """鲁棒 JSON 解析：处理 markdown fence、多余文本、控制字符。"""
+    import re
     raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-    raw = raw.strip()
-    return json.loads(raw)
+
+    # 去掉 markdown code fence (```json ... ``` 或 ``` ... ```)
+    fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw, re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+
+    # 尝试直接解析
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # 提取第一个 { 到最后一个 } 或第一个 [ 到最后一个 ]
+    brace_start = raw.find('{')
+    bracket_start = raw.find('[')
+    if brace_start >= 0 and (bracket_start < 0 or brace_start < bracket_start):
+        brace_end = raw.rfind('}')
+        if brace_end > brace_start:
+            candidate = raw[brace_start:brace_end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+    elif bracket_start >= 0:
+        bracket_end = raw.rfind(']')
+        if bracket_end > bracket_start:
+            candidate = raw[bracket_start:bracket_end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+    # 最后尝试修复常见格式问题（尾逗号、控制字符）
+    cleaned = re.sub(r',\s*([}\]])', r'\1', raw)  # 去尾逗号
+    cleaned = re.sub(r'[\x00-\x1f]', ' ', cleaned)  # 去控制字符
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error("[LLM] JSON 解析失败: {}\n原始内容前200字: {}", e, raw[:200])
+        raise
 
 
 # ── Prompt 模板加载 ────────────────────────────────────────────────────────────

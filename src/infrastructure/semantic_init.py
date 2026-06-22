@@ -21,7 +21,8 @@ import time
 from loguru import logger
 
 from config.settings import settings
-from src.infrastructure.database import chroma_collection, get_pg_conn, release_pg_conn
+from src.infrastructure import database
+from src.infrastructure.database import get_pg_conn, release_pg_conn
 from src.infrastructure.data_fetcher import fetch_business_description
 from src.nodes.llm_utils import call_llm
 
@@ -41,10 +42,10 @@ SUMMARIZE_PROMPT = """请对以下A股上市公司的主营业务描述做精简
 
 def _get_existing_ts_codes() -> set[str]:
     """从 ChromaDB 查询已入库的 ts_code 集合"""
-    if chroma_collection is None:
+    if database.chroma_collection is None:
         return set()
     try:
-        all_data = chroma_collection.get(include=["metadatas"])
+        all_data = database.chroma_collection.get(include=["metadatas"])
         if all_data and all_data["metadatas"]:
             return {m.get("ts_code") for m in all_data["metadatas"] if m.get("ts_code")}
     except Exception as e:
@@ -53,8 +54,10 @@ def _get_existing_ts_codes() -> set[str]:
 
 
 def _get_all_stocks() -> list[dict]:
-    """从 PostgreSQL 读取全A股基础信息"""
-    conn = get_pg_conn()
+    """从 PostgreSQL 读取全A股基础信息（使用直连避免连接池 SSH 隧道冲突）"""
+    import psycopg2 as _pg2
+    from config.settings import settings as _settings
+    conn = _pg2.connect(_settings.pg_dsn)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -64,7 +67,7 @@ def _get_all_stocks() -> list[dict]:
             rows = cur.fetchall()
         return [{"ts_code": r[0], "name": r[1], "industry": r[2]} for r in rows]
     finally:
-        release_pg_conn(conn)
+        conn.close()
 
 
 def _summarize(name: str, ts_code: str, raw_text: str) -> str:
@@ -79,7 +82,7 @@ def run() -> dict:
     语义知识库初始化主流程。
     返回统计信息 dict。
     """
-    if chroma_collection is None:
+    if database.chroma_collection is None:
         raise RuntimeError("ChromaDB 未初始化，请先调用 init_all()")
 
     logger.info("[SemanticInit] ===== 开始全A股语义知识库初始化 =====")
@@ -137,7 +140,7 @@ def run() -> dict:
         # 每 50 只写入一次 ChromaDB
         if len(batch_ids) >= 50:
             try:
-                chroma_collection.add(
+                database.chroma_collection.add(
                     ids=batch_ids, documents=batch_docs, metadatas=batch_metas,
                 )
                 logger.info("[SemanticInit] 批量写入 ChromaDB {} 只", len(batch_ids))
@@ -158,7 +161,7 @@ def run() -> dict:
     # 写入剩余
     if batch_ids:
         try:
-            chroma_collection.add(
+            database.chroma_collection.add(
                 ids=batch_ids, documents=batch_docs, metadatas=batch_metas,
             )
             logger.info("[SemanticInit] 最终批量写入 {} 只", len(batch_ids))
@@ -168,6 +171,6 @@ def run() -> dict:
     logger.info(
         "[SemanticInit] ===== 完成 ===== 总计 {} | 成功 {} | 失败 {} | ChromaDB 总量 {}",
         stats["total"], stats["success"], stats["failed"],
-        chroma_collection.count(),
+        database.chroma_collection.count(),
     )
     return stats

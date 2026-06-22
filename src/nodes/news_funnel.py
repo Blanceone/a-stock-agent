@@ -71,7 +71,7 @@ def run(state: dict) -> dict:
 
     title = raw_news.title
     summary = getattr(raw_news, "summary", "") or ""
-    url = raw_news.url
+    url = getattr(raw_news, "article_id", "") or getattr(raw_news, "url", "")
     logger.info("[news_funnel] 处理: {}", title)
 
     # 1. 一级粗筛

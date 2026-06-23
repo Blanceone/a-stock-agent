@@ -121,35 +121,39 @@ def _init_postgres() -> psycopg2.pool.SimpleConnectionPool:
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────────
 def _init_chromadb() -> tuple:
-    """初始化 ChromaDB 连接，兼容不同版本的服务端。"""
+    """初始化 ChromaDB 连接，兼容不同版本的服务端。
+
+    检测顺序：先探测 v0.x REST API（轻量 HTTP GET），成功则使用兼容模式；
+    REST 失败再尝试 v1.x HttpClient。避免不必要的 WARNING 日志。
+    """
     from chromadb.utils import embedding_functions
 
     logger.info("[DB] 初始化 ChromaDB: {}:{}", settings.chromadb_host, settings.chromadb_port)
 
     client = None
-    # 尝试新版 HttpClient (1.x 客户端)
+    base_url = f"http://{settings.chromadb_host}:{settings.chromadb_port}"
+
+    # ── 优先探测 v0.x REST API（轻量 GET，本项目服务端即此版本）──────
     try:
-        client = chromadb.HttpClient(
-            host=settings.chromadb_host,
-            port=settings.chromadb_port,
-        )
-        # 验证连接
-        client.heartbeat()
-    except Exception as e1:
-        logger.warning("[DB] ChromaDB HttpClient 连接失败: {}，尝试兼容模式", e1)
-        # 降级：使用 REST API 直接通信
+        import requests
+        resp = requests.get(f"{base_url}/api/v1/heartbeat", timeout=5)
+        if resp.ok:
+            logger.info("[DB] ChromaDB v0.x 服务端在线，使用兼容模式")
+            client = _ChromaDBCompat(base_url)
+    except Exception:
+        pass  # REST 不可达，继续尝试 v1.x
+
+    # ── 降级：尝试 v1.x HttpClient ──────────────────────────────────
+    if client is None:
         try:
-            import requests
-            base_url = f"http://{settings.chromadb_host}:{settings.chromadb_port}"
-            resp = requests.get(f"{base_url}/api/v1/heartbeat", timeout=5)
-            if resp.ok:
-                logger.info("[DB] ChromaDB v0.x 服务端在线，使用兼容模式")
-                # 创建简化包装器
-                client = _ChromaDBCompat(base_url)
-            else:
-                raise Exception(f"heartbeat 返回 {resp.status_code}")
-        except Exception as e2:
-            logger.error("[DB] ChromaDB 完全不可用: {}", e2)
+            client = chromadb.HttpClient(
+                host=settings.chromadb_host,
+                port=settings.chromadb_port,
+            )
+            client.heartbeat()
+            logger.info("[DB] ChromaDB v1.x 客户端连接成功")
+        except Exception as e:
+            logger.error("[DB] ChromaDB 完全不可用: {}", e)
             return None, None
 
     # 使用 bge-small-zh-v1.5（优先使用本地模型路径）

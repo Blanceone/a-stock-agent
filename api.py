@@ -175,72 +175,12 @@ def get_today_alerts():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    """简易审核主页"""
-    return """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>A股投研智能体 - SOP 审核平台</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
-  h1 { color: #1a1a1a; border-bottom: 2px solid #e63946; padding-bottom: 10px; }
-  .card { background: white; border-radius: 8px; padding: 16px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-  .btn { padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer; margin-right: 8px; }
-  .btn-approve { background: #2a9d8f; color: white; }
-  .btn-reject { background: #e63946; color: white; }
-  .btn:hover { opacity: 0.85; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
-  .badge-pending { background: #ffd166; }
-  .badge-approved { background: #2a9d8f; color: white; }
-  #alerts { margin-top: 30px; }
-  .alert-item { border-left: 4px solid #e63946; padding: 10px; margin: 5px 0; background: #fff; }
-  pre { background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 13px; }
-</style>
-</head>
-<body>
-<h1>🔬 A股投研智能体 - SOP 审核平台</h1>
-<h2>待审核 SOP</h2>
-<div id="pending">加载中...</div>
-<h2>🚨 今日三共振预警</h2>
-<div id="alerts">加载中...</div>
-<script>
-async function loadPending() {
-  const r = await fetch('/sop/pending');
-  const d = await r.json();
-  const el = document.getElementById('pending');
-  if (d.count === 0) { el.innerHTML = '<p>暂无待审核 SOP</p>'; return; }
-  el.innerHTML = d.items.map(i => `
-    <div class="card">
-      <span class="badge badge-pending">#${i.id}</span>
-      <pre>${JSON.stringify(i.graph_json, null, 2)}</pre>
-      <p style="color:#666;font-size:13px">${i.source_text}</p>
-      <button class="btn btn-approve" onclick="approve(${i.id})">✓ 通过</button>
-      <button class="btn btn-reject" onclick="reject(${i.id})">✗ 拒绝</button>
-    </div>`).join('');
-}
-async function loadAlerts() {
-  const r = await fetch('/alerts/today');
-  const d = await r.json();
-  const el = document.getElementById('alerts');
-  if (d.count === 0) { el.innerHTML = '<p>今日无预警信号</p>'; return; }
-  el.innerHTML = d.items.map(a => `
-    <div class="alert-item">
-      <b>${a.ts_code}</b> | 消息${a.news_score} 资金${a.capital_inflow_pct}% 量比${a.volume_ratio}
-      <br><small>${a.news_title}</small>
-    </div>`).join('');
-}
-async function approve(id) {
-  await fetch(`/sop/approve/${id}`, {method:'POST',headers:{'Content-Type':'application/json'},body:'{"approved_by":"admin"}'});
-  loadPending();
-}
-async function reject(id) {
-  await fetch(`/sop/reject/${id}`, {method:'POST'});
-  loadPending();
-}
-loadPending(); loadAlerts();
-</script>
-</body>
-</html>"""
+    """数据仪表盘主页"""
+    dashboard_path = PROJECT_ROOT / "static" / "dashboard.html"
+    if dashboard_path.exists():
+        return dashboard_path.read_text(encoding="utf-8")
+    # 降级：简单跳转提示
+    return "<h1>请确保 static/dashboard.html 存在</h1>"
 
 
 # ── 健康检查 ──────────────────────────────────────────────────────────────────
@@ -248,3 +188,134 @@ loadPending(); loadAlerts();
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+
+# ── 数据浏览 API ─────────────────────────────────────────────────────────────
+
+@app.get("/api/stats")
+def system_stats():
+    """系统运行统计"""
+    stats = {}
+    # PostgreSQL
+    try:
+        conn = get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM stock_basic")
+                stats["stock_total"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM stock_basic WHERE list_status='L' AND is_st=FALSE")
+                stats["stock_active"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM sop_pending WHERE status='pending'")
+                stats["sop_pending"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM sop_active")
+                stats["sop_active"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM sop_active WHERE approved=TRUE")
+                stats["sop_approved"] = cur.fetchone()[0]
+        finally:
+            release_pg_conn(conn)
+    except Exception as e:
+        stats["pg_error"] = str(e)
+    # ChromaDB
+    try:
+        from src.infrastructure.database import chroma_collection
+        stats["chroma_count"] = chroma_collection.count() if chroma_collection else 0
+    except Exception:
+        stats["chroma_count"] = 0
+    # Redis
+    try:
+        if redis_client:
+            today = datetime.now().strftime("%Y%m%d")
+            stats["alerts_today"] = redis_client.llen(f"dynamic:alerts:{today}") or 0
+            stats["llm_cache"] = len(redis_client.keys("llm:*"))
+            stats["has_stock_pool"] = bool(redis_client.exists("static:stock_pool"))
+        else:
+            stats["alerts_today"] = 0
+            stats["llm_cache"] = 0
+            stats["has_stock_pool"] = False
+    except Exception:
+        stats["redis_error"] = True
+    return stats
+
+
+@app.get("/api/stocks")
+def list_stocks(
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=10, le=200),
+    search: str = Query("", description="按代码或名称搜索"),
+    sort: str = Query("circ_mv", description="排序字段: circ_mv/name/ts_code"),
+    order: str = Query("desc", description="asc/desc"),
+):
+    """股票列表（分页）"""
+    conn = get_pg_conn()
+    try:
+        where_clause = "WHERE 1=1"
+        params: list = []
+        if search:
+            where_clause += " AND (ts_code ILIKE %s OR name ILIKE %s)"
+            params.extend([f"%{search}%", f"%{search}%"])
+        order_dir = "DESC" if order == "desc" else "ASC"
+        sort_col = sort if sort in ("circ_mv", "name", "ts_code", "industry") else "circ_mv"
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM stock_basic {where_clause}", params)
+            total = cur.fetchone()[0]
+            offset = (page - 1) * size
+            cur.execute(
+                f"SELECT ts_code, name, industry, circ_mv, is_st, list_status, updated_at "
+                f"FROM stock_basic {where_clause} "
+                f"ORDER BY {sort_col} {order_dir} NULLS LAST LIMIT %s OFFSET %s",
+                params + [size, offset],
+            )
+            rows = cur.fetchall()
+        return {
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": (total + size - 1) // size,
+            "items": [
+                {
+                    "ts_code": r[0], "name": r[1], "industry": r[2],
+                    "circ_mv": float(r[3]) if r[3] else 0,
+                    "is_st": r[4], "list_status": r[5],
+                    "updated_at": r[6].isoformat() if r[6] else None,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        release_pg_conn(conn)
+
+
+@app.get("/api/semantic")
+def semantic_search(q: str = Query("", min_length=1), n: int = Query(10, ge=1, le=50)):
+    """ChromaDB 语义搜索"""
+    from src.infrastructure.database import chroma_collection
+    if chroma_collection is None:
+        return {"error": "ChromaDB 不可用", "items": []}
+    try:
+        result = chroma_collection.query(query_texts=[q], n_results=n)
+        items = []
+        ids = result.get("ids", [[]])[0]
+        docs = result.get("documents", [[]])[0]
+        metas = result.get("metadatas", [[]])[0]
+        dists = result.get("distances", [[]])[0]
+        for i in range(len(ids)):
+            items.append({
+                "id": ids[i],
+                "document": docs[i][:500] if docs[i] else "",
+                "metadata": metas[i] if metas[i] else {},
+                "score": round(1 - dists[i], 4) if dists[i] is not None else 0,
+            })
+        return {"query": q, "count": len(items), "items": items}
+    except Exception as e:
+        return {"error": str(e), "items": []}
+
+
+@app.get("/api/stockpool")
+def stock_pool():
+    """静态图谱股池"""
+    if redis_client is None:
+        return {"tier1": [], "tier2": []}
+    raw = redis_client.get("static:stock_pool")
+    if not raw:
+        return {"tier1": [], "tier2": []}
+    return json.loads(raw)

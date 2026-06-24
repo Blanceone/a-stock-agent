@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股投研智能体 - 数据仪表盘</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg:#0f1117; --card:#1a1d29; --border:#2a2d3a; --text:#e1e4ea;
+  --muted:#6b7280; --accent:#3b82f6; --green:#10b981; --red:#ef4444;
+  --yellow:#f59e0b; --purple:#8b5cf6;
+}
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+a { color:var(--accent); text-decoration:none; }
+
+/* Layout */
+.layout { display:flex; min-height:100vh; }
+.sidebar { width:220px; background:var(--card); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; }
+.sidebar h1 { font-size:15px; padding:0 20px 20px; border-bottom:1px solid var(--border); color:var(--accent); }
+.nav { list-style:none; margin-top:10px; }
+.nav li { padding:12px 20px; cursor:pointer; color:var(--muted); font-size:14px; transition:all .15s; display:flex; align-items:center; gap:10px; }
+.nav li:hover { background:rgba(59,130,246,0.08); color:var(--text); }
+.nav li.active { background:rgba(59,130,246,0.12); color:var(--accent); border-right:3px solid var(--accent); }
+.nav li .icon { font-size:18px; width:24px; text-align:center; }
+.main { flex:1; padding:24px 32px; overflow-y:auto; max-height:100vh; }
+.page-title { font-size:22px; font-weight:600; margin-bottom:20px; }
+
+/* Cards & stats */
+.stats-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:16px; margin-bottom:24px; }
+.stat-card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; }
+.stat-card .label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; }
+.stat-card .value { font-size:28px; font-weight:700; margin-top:6px; }
+.stat-card .sub { font-size:12px; color:var(--muted); margin-top:4px; }
+.stat-card.blue .value { color:var(--accent); }
+.stat-card.green .value { color:var(--green); }
+.stat-card.yellow .value { color:var(--yellow); }
+.stat-card.purple .value { color:var(--purple); }
+.stat-card.red .value { color:var(--red); }
+
+/* Table */
+.panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:20px; }
+.panel-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+.panel-title { font-size:16px; font-weight:600; }
+.toolbar { display:flex; gap:10px; align-items:center; }
+.toolbar input { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; outline:none; width:200px; }
+.toolbar input:focus { border-color:var(--accent); }
+.toolbar select { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { text-align:left; padding:10px 12px; border-bottom:2px solid var(--border); color:var(--muted); font-weight:500; cursor:pointer; user-select:none; }
+th:hover { color:var(--accent); }
+td { padding:10px 12px; border-bottom:1px solid var(--border); }
+tr:hover td { background:rgba(59,130,246,0.04); }
+.badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:500; }
+.badge-st { background:var(--red); color:#fff; }
+.badge-active { background:var(--green); color:#fff; }
+.badge-pending { background:var(--yellow); color:#000; }
+.badge-approved { background:var(--green); color:#fff; }
+
+/* Pagination */
+.pagination { display:flex; gap:6px; justify-content:center; margin-top:16px; }
+.pagination button { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:4px; cursor:pointer; font-size:13px; }
+.pagination button:hover { border-color:var(--accent); }
+.pagination button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+.pagination button:disabled { opacity:0.4; cursor:default; }
+
+/* Buttons */
+.btn { padding:6px 14px; border:none; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500; transition:opacity .15s; }
+.btn:hover { opacity:0.85; }
+.btn-blue { background:var(--accent); color:#fff; }
+.btn-green { background:var(--green); color:#fff; }
+.btn-red { background:var(--red); color:#fff; }
+.btn-sm { padding:4px 10px; font-size:12px; }
+
+/* Semantic search */
+.search-box { display:flex; gap:10px; margin-bottom:20px; }
+.search-box input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:12px 16px; border-radius:8px; font-size:14px; outline:none; }
+.search-box input:focus { border-color:var(--accent); }
+.search-result { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:10px; }
+.search-result .score { color:var(--accent); font-weight:600; font-size:14px; }
+.search-result .doc { color:var(--text); font-size:13px; margin-top:6px; line-height:1.6; }
+.search-result .meta { color:var(--muted); font-size:12px; margin-top:6px; }
+
+/* Alert items */
+.alert-card { background:var(--bg); border-left:4px solid var(--red); border-radius:0 8px 8px 0; padding:14px 16px; margin-bottom:10px; }
+.alert-card .title { font-weight:600; font-size:14px; }
+.alert-card .detail { color:var(--muted); font-size:13px; margin-top:6px; }
+.alert-card .metrics { display:flex; gap:16px; margin-top:8px; }
+.alert-card .metric { font-size:13px; }
+.alert-card .metric b { color:var(--accent); }
+
+/* SOP cards */
+.sop-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px; }
+.sop-card .sop-title { font-weight:600; font-size:14px; margin-bottom:8px; }
+.sop-card pre { background:var(--card); padding:10px; border-radius:6px; font-size:12px; overflow-x:auto; max-height:200px; overflow-y:auto; }
+.sop-actions { display:flex; gap:8px; margin-top:10px; }
+
+/* Stock pool */
+.tier-header { font-size:15px; font-weight:600; margin:16px 0 10px; padding-left:8px; border-left:3px solid var(--accent); }
+.stock-item { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid var(--border); }
+.stock-item:last-child { border-bottom:none; }
+.stock-item .code { font-weight:600; color:var(--accent); }
+.stock-item .score { color:var(--green); font-weight:600; }
+.stock-item .reason { color:var(--muted); font-size:12px; max-width:50%; text-align:right; }
+
+/* Loading */
+.loading { text-align:center; padding:40px; color:var(--muted); }
+.empty { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
+
+/* Responsive */
+@media(max-width:768px) {
+  .sidebar { width:60px; } .sidebar h1 { font-size:0; padding:10px; } .sidebar h1::first-letter { font-size:15px; }
+  .nav li { padding:10px; font-size:0; } .nav li .icon { font-size:18px; }
+  .main { padding:16px; }
+  .stats-grid { grid-template-columns:repeat(2,1fr); }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <h1>A股投研智能体</h1>
+    <ul class="nav">
+      <li class="active" data-page="overview"><span class="icon">&#9673;</span> 系统概览</li>
+      <li data-page="stocks"><span class="icon">&#9733;</span> 股票库</li>
+      <li data-page="semantic"><span class="icon">&#9782;</span> 语义搜索</li>
+      <li data-page="alerts"><span class="icon">&#9888;</span> 预警信号</li>
+      <li data-page="pool"><span class="icon">&#9830;</span> 图谱股池</li>
+      <li data-page="sop"><span class="icon">&#9881;</span> SOP 管理</li>
+    </ul>
+  </div>
+  <div class="main" id="content"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+const el = (tag, cls, html) => { const e = document.createElement(tag); if(cls) e.className=cls; if(html!==undefined) e.innerHTML=html; return e; };
+
+async function api(path) {
+  try { const r = await fetch(path); return await r.json(); } catch(e) { return null; }
+}
+
+// ── Navigation ──
+$$('.nav li').forEach(li => {
+  li.onclick = () => {
+    $$('.nav li').forEach(l => l.classList.remove('active'));
+    li.classList.add('active');
+    loadPage(li.dataset.page);
+  };
+});
+
+function loadPage(name) {
+  const pages = { overview:renderOverview, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, sop:renderSOP };
+  (pages[name] || renderOverview)();
+}
+
+// ── Overview ──
+async function renderOverview() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">系统概览</h2><div class="loading">加载中...</div>';
+  const s = await api('/api/stats');
+  if (!s) { c.innerHTML = '<div class="empty">无法连接 API 服务</div>'; return; }
+
+  let html = '<h2 class="page-title">系统概览</h2><div class="stats-grid">';
+  html += `<div class="stat-card blue"><div class="label">股票总数</div><div class="value">${s.stock_total||0}</div><div class="sub">活跃 ${s.stock_active||0}</div></div>`;
+  html += `<div class="stat-card purple"><div class="label">语义向量</div><div class="value">${s.chroma_count||0}</div><div class="sub">ChromaDB 嵌入</div></div>`;
+  html += `<div class="stat-card red"><div class="label">今日预警</div><div class="value">${s.alerts_today||0}</div><div class="sub">三共振信号</div></div>`;
+  html += `<div class="stat-card yellow"><div class="label">SOP 待审</div><div class="value">${s.sop_pending||0}</div><div class="sub">共 ${s.sop_active||0} 条 (${s.sop_approved||0} 已批准)</div></div>`;
+  html += `<div class="stat-card green"><div class="label">图谱股池</div><div class="value">${s.has_stock_pool?'已生成':'未生成'}</div><div class="sub">静态分析结果</div></div>`;
+  html += `<div class="stat-card blue"><div class="label">LLM 缓存</div><div class="value">${s.llm_cache||0}</div><div class="sub">DeepSeek 调用缓存</div></div>`;
+  html += '</div>';
+
+  // Quick status
+  html += '<div class="panel"><div class="panel-title">基础设施状态</div><div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">';
+  html += `<span class="badge ${s.pg_error?'badge-st':'badge-approved'}">PostgreSQL ${s.pg_error?'离线':'在线'}</span>`;
+  html += `<span class="badge ${(s.chroma_count||0)>0?'badge-approved':'badge-st'}">ChromaDB ${(s.chroma_count||0)>0?'在线':'离线'}</span>`;
+  html += `<span class="badge ${s.redis_error?'badge-st':'badge-approved'}">Redis ${s.redis_error?'离线':'在线'}</span>`;
+  html += '</div></div>';
+
+  c.innerHTML = html;
+}
+
+// ── Stocks ──
+let stockState = { page:1, search:'', sort:'circ_mv', order:'desc' };
+async function renderStocks() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">股票库</h2><div class="panel"><div class="panel-header"><div class="toolbar"><input id="stockSearch" placeholder="搜索代码或名称..." value="'+stockState.search+'"><select id="stockSize"><option value="50">50条/页</option><option value="100">100条/页</option><option value="200">200条/页</option></select></div></div><div class="loading">加载中...</div></div>';
+
+  $('#stockSearch').oninput = debounce(e => { stockState.search=e.target.value; stockState.page=1; fetchStocks(); }, 400);
+  $('#stockSize').onchange = e => { stockState.size=+e.target.value; stockState.page=1; fetchStocks(); };
+  fetchStocks();
+}
+
+async function fetchStocks() {
+  const c = $('#content');
+  const p = c.querySelector('.loading') || c.querySelector('.panel');
+  const s = stockState;
+  const d = await api(`/api/stocks?page=${s.page}&size=${s.size||50}&search=${encodeURIComponent(s.search)}&sort=${s.sort}&order=${s.order}`);
+  if (!d) return;
+
+  let html = `<table><thead><tr>
+    <th onclick="sortStock('ts_code')">代码 ${sortIcon('ts_code')}</th>
+    <th onclick="sortStock('name')">名称</th>
+    <th onclick="sortStock('industry')">行业</th>
+    <th onclick="sortStock('circ_mv')">流通市值 ${sortIcon('circ_mv')}</th>
+    <th>状态</th>
+  </tr></thead><tbody>`;
+  for (const s of d.items) {
+    const mv = s.circ_mv ? (s.circ_mv/10000).toFixed(0)+' 亿' : '-';
+    const st = s.is_st ? '<span class="badge badge-st">ST</span>' : '<span class="badge badge-active">活跃</span>';
+    html += `<tr><td><b>${s.ts_code}</b></td><td>${s.name}</td><td>${s.industry||'-'}</td><td>${mv}</td><td>${st}</td></tr>`;
+  }
+  if (!d.items.length) html += '<tr><td colspan="5" class="empty">无数据</td></tr>';
+  html += '</tbody></table>';
+  html += renderPagination(d.page, d.pages, 'gotoStockPage');
+
+  const panel = c.querySelector('.panel');
+  const toolbar = panel.querySelector('.panel-header');
+  panel.innerHTML = '';
+  panel.appendChild(toolbar);
+  panel.insertAdjacentHTML('beforeend', html);
+}
+
+function sortStock(col) { stockState.sort=col; stockState.order=stockState.order==='desc'?'asc':'desc'; fetchStocks(); }
+function sortIcon(col) { return stockState.sort===col ? (stockState.order==='desc'?'&#9660;':'&#9650;') : ''; }
+function gotoStockPage(p) { stockState.page=p; fetchStocks(); }
+
+// ── Semantic ──
+async function renderSemantic() {
+  const c = $('#content');
+  c.innerHTML = `<h2 class="page-title">语义搜索</h2>
+    <div class="panel"><p style="color:var(--muted);margin-bottom:12px">输入业务关键词，通过 ChromaDB 向量搜索匹配最相似的上市公司主营业务描述</p>
+    <div class="search-box"><input id="semQuery" placeholder="例如：新能源电池、机器人、白酒..." autofocus><button class="btn btn-blue" onclick="doSemanticSearch()">搜索</button></div>
+    <div id="semResults"></div></div>`;
+  $('#semQuery').onkeydown = e => { if(e.key==='Enter') doSemanticSearch(); };
+}
+
+async function doSemanticSearch() {
+  const q = $('#semQuery').value.trim();
+  if (!q) return;
+  const r = $('#semResults');
+  r.innerHTML = '<div class="loading">搜索中...</div>';
+  const d = await api(`/api/semantic?q=${encodeURIComponent(q)}&n=15`);
+  if (!d || d.error) { r.innerHTML = `<div class="empty">${d?.error||'搜索失败'}</div>`; return; }
+  if (!d.items.length) { r.innerHTML = '<div class="empty">未找到匹配结果</div>'; return; }
+  let html = `<p style="color:var(--muted);margin-bottom:12px">找到 ${d.count} 条相关结果</p>`;
+  for (const it of d.items) {
+    const pct = (it.score*100).toFixed(1);
+    html += `<div class="search-result"><div class="score">${it.id} - 匹配度 ${pct}%</div><div class="doc">${escHtml(it.document)}</div>`;
+    if (it.metadata && Object.keys(it.metadata).length) html += `<div class="meta">${JSON.stringify(it.metadata)}</div>`;
+    html += '</div>';
+  }
+  r.innerHTML = html;
+}
+
+// ── Alerts ──
+async function renderAlerts() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">预警信号</h2><div class="loading">加载中...</div>';
+  const d = await api('/alerts/today');
+  if (!d) { c.innerHTML = '<div class="empty">无法获取预警数据</div>'; return; }
+  let html = `<h2 class="page-title">今日预警 (${d.date})</h2>`;
+  if (!d.items.length) { html += '<div class="panel"><div class="empty">今日无三共振预警信号</div></div>'; }
+  else {
+    html += `<p style="color:var(--muted);margin-bottom:12px">共 ${d.count} 条信号</p>`;
+    for (const a of d.items) {
+      html += `<div class="alert-card">
+        <div class="title">${a.ts_code}</div>
+        <div class="detail">${escHtml(a.news_title||'')}</div>
+        <div class="metrics">
+          <span class="metric">消息评分: <b>${a.news_score?.toFixed(2)||'-'}</b></span>
+          <span class="metric">主力净流入: <b>${a.capital_inflow_pct?.toFixed(1)||'-'}%</b></span>
+          <span class="metric">量比: <b>${a.volume_ratio?.toFixed(1)||'-'}</b></span>
+        </div></div>`;
+    }
+  }
+  c.innerHTML = html;
+}
+
+// ── Stock Pool ──
+async function renderPool() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">图谱股池</h2><div class="loading">加载中...</div>';
+  const d = await api('/api/stockpool');
+  if (!d) { c.innerHTML = '<div class="empty">无法获取数据</div>'; return; }
+  let html = '<h2 class="page-title">静态图谱选股结果</h2>';
+  const t1 = d.tier1 || [];
+  const t2 = d.tier2 || [];
+  if (!t1.length && !t2.length) { html += '<div class="panel"><div class="empty">尚未运行静态图谱构建<br><small>运行 <code>python main.py --mode static</code> 生成</small></div></div>'; c.innerHTML = html; return; }
+  if (t1.length) {
+    html += `<div class="panel"><div class="tier-header">第一梯队 (${t1.length} 只)</div>`;
+    for (const s of t1) {
+      const mv = s.score ? s.score.toFixed(3) : '-';
+      html += `<div class="stock-item"><span class="code">${s.ts_code}</span> <span>${s.name}</span><span class="reason">${escHtml(s.reason||'')}</span><span class="score">${mv}</span></div>`;
+    }
+    html += '</div>';
+  }
+  if (t2.length) {
+    html += `<div class="panel"><div class="tier-header">第二梯队 (${t2.length} 只)</div>`;
+    for (const s of t2) {
+      const mv = s.score ? s.score.toFixed(3) : '-';
+      html += `<div class="stock-item"><span class="code">${s.ts_code}</span> <span>${s.name}</span><span class="reason">${escHtml(s.reason||'')}</span><span class="score">${mv}</span></div>`;
+    }
+    html += '</div>';
+  }
+  c.innerHTML = html;
+}
+
+// ── SOP ──
+async function renderSOP() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">SOP 管理</h2><div class="loading">加载中...</div>';
+  const [p, a] = await Promise.all([api('/sop/pending?limit=50'), api('/sop/active?limit=50')]);
+  let html = '<h2 class="page-title">SOP 战法管理</h2>';
+  // Pending
+  html += `<div class="panel"><div class="panel-title">待审核 (${p?.count||0})</div>`;
+  if (p && p.items.length) {
+    for (const it of p.items) {
+      html += `<div class="sop-card"><div class="sop-title"><span class="badge badge-pending">#${it.id}</span> ${it.status}</div>`;
+      if (it.graph_json) html += `<pre>${escHtml(JSON.stringify(it.graph_json, null, 2))}</pre>`;
+      if (it.source_text) html += `<p style="color:var(--muted);font-size:12px;margin-top:8px">${escHtml(it.source_text?.substring(0,200)||'')}</p>`;
+      html += `<div class="sop-actions"><button class="btn btn-green btn-sm" onclick="sopAction('approve',${it.id})">通过</button><button class="btn btn-red btn-sm" onclick="sopAction('reject',${it.id})">拒绝</button></div></div>`;
+    }
+  } else { html += '<div class="empty">无待审核 SOP</div>'; }
+  html += '</div>';
+  // Active
+  html += `<div class="panel"><div class="panel-title">已审核 (${a?.count||0})</div>`;
+  if (a && a.items.length) {
+    for (const it of a.items) {
+      const badge = it.approved ? '<span class="badge badge-approved">已批准</span>' : '<span class="badge badge-pending">待批准</span>';
+      html += `<div class="sop-card"><div class="sop-title">${badge} #${it.id} ${it.sop_name||''}</div>`;
+      if (it.policy_name) html += `<p style="color:var(--muted);font-size:13px">关联政策: ${escHtml(it.policy_name)}</p>`;
+      if (it.graph_json) html += `<pre>${escHtml(JSON.stringify(it.graph_json, null, 2))}</pre>`;
+      if (it.approved_by) html += `<p style="color:var(--muted);font-size:12px;margin-top:6px">审核人: ${it.approved_by} | ${it.approved_at||''}</p>`;
+      html += '</div>';
+    }
+  } else { html += '<div class="empty">无已审核 SOP</div>'; }
+  html += '</div>';
+  c.innerHTML = html;
+}
+
+async function sopAction(action, id) {
+  if (action==='approve') await fetch(`/sop/approve/${id}`, {method:'POST',headers:{'Content-Type':'application/json'},body:'{"approved_by":"admin"}'});
+  else await fetch(`/sop/reject/${id}`, {method:'POST'});
+  renderSOP();
+}
+
+// ── Helpers ──
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; }
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function renderPagination(cur, total, fnName) {
+  if (total<=1) return '';
+  let h = '<div class="pagination">';
+  h += `<button onclick="${fnName}(${cur-1})" ${cur<=1?'disabled':''}>&lt;</button>`;
+  const start = Math.max(1, cur-3), end = Math.min(total, cur+3);
+  if (start>1) h += `<button onclick="${fnName}(1)">1</button>`;
+  if (start>2) h += '<button disabled>...</button>';
+  for (let i=start; i<=end; i++) h += `<button class="${i===cur?'active':''}" onclick="${fnName}(${i})">${i}</button>`;
+  if (end<total-1) h += '<button disabled>...</button>';
+  if (end<total) h += `<button onclick="${fnName}(${total})">${total}</button>`;
+  h += `<button onclick="${fnName}(${cur+1})" ${cur>=total?'disabled':''}>&gt;</button>`;
+  h += '</div>';
+  return h;
+}
+
+// Init
+loadPage('overview');
+</script>
+</body>
+</html>

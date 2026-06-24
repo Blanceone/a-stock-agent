@@ -63,11 +63,16 @@ async def run_dynamic() -> None:
     from src.infrastructure.rss_fetcher import poll_rss
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+    news_queue: asyncio.Queue = asyncio.Queue()
 
-    # RSS 轮询 → 动态流水线
+    # 启动 RSS 轮询后台任务（生产者，持续向 news_queue 推入新闻）
+    asyncio.create_task(poll_rss(news_queue, interval_sec=60))
+
+    # 定时消费队列中的新闻 → 动态流水线
     async def rss_pipeline_job():
         global _shared_concepts
-        async for news_item in poll_rss():
+        while not news_queue.empty():
+            news_item = await news_queue.get()
             result = process_news_item(news_item, _shared_concepts)
             if result.get("concepts_updated"):
                 _shared_concepts = result["concepts_updated"]

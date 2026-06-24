@@ -19,6 +19,7 @@ REDIS_KEY_URL_DEDUP    = "dedup:url:{url_md5}"
 REDIS_KEY_LLM_CACHE    = "llm:{prompt_hash}"
 REDIS_KEY_RATE_LIMIT   = "rate:searxng:{minute_bucket}"
 REDIS_KEY_NEXT_WEIGHTS = "weights:stock:{ts_code}"
+REDIS_KEY_NEWS_FEED    = "dynamic:news_feed"
 
 # ── PostgreSQL 建表 DDL ───────────────────────────────────────────────────────
 _DDL = """

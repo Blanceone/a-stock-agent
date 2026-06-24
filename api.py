@@ -319,3 +319,17 @@ def stock_pool():
     if not raw:
         return {"tier1": [], "tier2": []}
     return json.loads(raw)
+
+
+@app.get("/api/news")
+def news_feed(limit: int = Query(50, ge=10, le=200)):
+    """最新消息面（财联社电报）"""
+    from src.infrastructure.database import REDIS_KEY_NEWS_FEED
+    if redis_client is None:
+        return {"count": 0, "items": []}
+    try:
+        raw_items = redis_client.lrange(REDIS_KEY_NEWS_FEED, 0, limit - 1)
+        items = [json.loads(r) for r in raw_items]
+        return {"count": len(items), "items": items}
+    except Exception:
+        return {"count": 0, "items": []}

@@ -103,6 +103,18 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 .stock-item .score { color:var(--green); font-weight:600; }
 .stock-item .reason { color:var(--muted); font-size:12px; max-width:50%; text-align:right; }
 
+/* News feed */
+.news-item { padding:14px 0; border-bottom:1px solid var(--border); }
+.news-item:last-child { border-bottom:none; }
+.news-item .news-time { font-size:12px; color:var(--muted); margin-bottom:4px; display:flex; gap:8px; align-items:center; }
+.news-item .news-time .source-tag { background:var(--accent); color:#fff; padding:1px 6px; border-radius:3px; font-size:11px; }
+.news-item .news-title { font-size:14px; font-weight:500; line-height:1.5; }
+.news-item .news-summary { font-size:13px; color:var(--muted); margin-top:6px; line-height:1.6; }
+.news-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+.news-toolbar .info { color:var(--muted); font-size:13px; }
+.news-toolbar .refresh-btn { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+.news-toolbar .refresh-btn:hover { border-color:var(--accent); color:var(--accent); }
+
 /* Loading */
 .loading { text-align:center; padding:40px; color:var(--muted); }
 .empty { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
@@ -122,6 +134,7 @@ tr:hover td { background:rgba(59,130,246,0.04); }
     <h1>A股投研智能体</h1>
     <ul class="nav">
       <li class="active" data-page="overview"><span class="icon">&#9673;</span> 系统概览</li>
+      <li data-page="news"><span class="icon">&#9993;</span> 消息面</li>
       <li data-page="stocks"><span class="icon">&#9733;</span> 股票库</li>
       <li data-page="semantic"><span class="icon">&#9782;</span> 语义搜索</li>
       <li data-page="alerts"><span class="icon">&#9888;</span> 预警信号</li>
@@ -151,7 +164,7 @@ $$('.nav li').forEach(li => {
 });
 
 function loadPage(name) {
-  const pages = { overview:renderOverview, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, sop:renderSOP };
+  const pages = { overview:renderOverview, news:renderNews, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, sop:renderSOP };
   (pages[name] || renderOverview)();
 }
 
@@ -178,6 +191,39 @@ async function renderOverview() {
   html += `<span class="badge ${s.redis_error?'badge-st':'badge-approved'}">Redis ${s.redis_error?'离线':'在线'}</span>`;
   html += '</div></div>';
 
+  c.innerHTML = html;
+}
+
+// ── News ──
+async function renderNews() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">消息面</h2><div class="panel"><div class="news-toolbar"><div class="info">加载中...</div></div><div class="loading">获取最新消息...</div></div>';
+  const d = await api('/api/news?limit=100');
+  if (!d) { c.innerHTML = '<div class="empty">无法连接 API</div>'; return; }
+  let html = '<h2 class="page-title">消息面</h2><div class="panel">';
+  html += `<div class="news-toolbar"><div class="info">财联社电报 | 共 ${d.count} 条 | 每 5 分钟更新</div><button class="refresh-btn" onclick="renderNews()">&#8635; 刷新</button></div>`;
+  if (!d.items.length) {
+    html += '<div class="empty">暂无新闻数据<br><small>启动动态监控后将自动采集</small></div>';
+  } else {
+    // Group by date
+    let lastDate = '';
+    for (const n of d.items) {
+      const dt = n.pub_time ? new Date(n.pub_time) : null;
+      const dateStr = dt ? dt.toLocaleDateString('zh-CN') : '未知日期';
+      const timeStr = dt ? dt.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'}) : '';
+      if (dateStr !== lastDate) {
+        lastDate = dateStr;
+        html += `<div style="padding:8px 0;margin-top:8px;border-top:1px solid var(--border);color:var(--accent);font-size:13px;font-weight:600">${dateStr}</div>`;
+      }
+      const summary = (n.summary||'').replace(/<[^>]*>/g, '').trim();
+      html += `<div class="news-item">
+        <div class="news-time"><span class="source-tag">${escHtml(n.source||'财联社')}</span> ${timeStr}</div>
+        <div class="news-title">${escHtml(n.title||'')}</div>
+        ${summary ? `<div class="news-summary">${escHtml(summary.substring(0, 300))}</div>` : ''}
+      </div>`;
+    }
+  }
+  html += '</div>';
   c.innerHTML = html;
 }
 

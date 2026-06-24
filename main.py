@@ -66,7 +66,8 @@ async def run_dynamic() -> None:
     news_queue: asyncio.Queue = asyncio.Queue()
 
     # 启动 RSS 轮询后台任务（生产者，持续向 news_queue 推入新闻）
-    asyncio.create_task(poll_rss(news_queue, interval_sec=60))
+    # 间隔 300s（5 分钟），与 RSShub 缓存周期一致，是无风险最小间隔
+    asyncio.create_task(poll_rss(news_queue, interval_sec=300))
 
     # 定时消费队列中的新闻 → 动态流水线
     async def rss_pipeline_job():
@@ -95,7 +96,7 @@ async def run_dynamic() -> None:
         except Exception as e:
             logger.warning("[Main] 龙虎榜更新失败: {}", e)
 
-    scheduler.add_job(rss_pipeline_job, IntervalTrigger(minutes=1))
+    scheduler.add_job(rss_pipeline_job, IntervalTrigger(minutes=5))
     scheduler.add_job(top_list_update_job, CronTrigger(
         day_of_week="mon-fri", hour=15, minute=30
     ))

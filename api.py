@@ -8,12 +8,18 @@ api.py — SOP 审核 Web API（FastAPI）
   - POST /sop/reject/{id}  — 拒绝某条 SOP
   - GET  /alerts/today     — 查看今日三共振预警
 
+  - POST /api/run/{task}   — 触发后台任务 (init/semantic/static/dynamic)
+  - GET  /api/tasks        — 查看任务状态
+
 启动：uvicorn api:app --host 0.0.0.0 --port 8088
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -333,3 +339,76 @@ def news_feed(limit: int = Query(50, ge=10, le=200)):
         return {"count": len(items), "items": items}
     except Exception:
         return {"count": 0, "items": []}
+
+
+# ── 后台任务管理 ────────────────────────────────────────────────────────────
+
+_tasks: dict[str, dict] = {}  # task_id -> {name, status, started_at, log}
+
+TASKS_CONFIG = {
+    "init":     {"label": "初始化数据",   "cmd": [sys.executable, "main.py", "--mode", "init"]},
+    "semantic": {"label": "语义初始化",   "cmd": [sys.executable, "main.py", "--mode", "semantic"]},
+    "static":   {"label": "静态图谱构建", "cmd": [sys.executable, "main.py", "--mode", "static", "--pdf", "resources/policy.pdf"]},
+    "dynamic":  {"label": "动态监控",     "cmd": [sys.executable, "main.py", "--mode", "dynamic"]},
+}
+
+
+def _run_task(task_id: str, task_name: str, cmd: list[str]):
+    """在后台线程中运行子进程"""
+    _tasks[task_id]["status"] = "running"
+    _tasks[task_id]["pid"] = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(PROJECT_ROOT), text=True, encoding="utf-8", errors="replace",
+        )
+        _tasks[task_id]["pid"] = proc.pid
+        lines: list[str] = []
+        for line in proc.stdout:
+            lines.append(line.rstrip())
+            if len(lines) > 500:
+                lines.pop(0)
+            _tasks[task_id]["log"] = "\n".join(lines[-100:])
+        proc.wait()
+        _tasks[task_id]["status"] = "done" if proc.returncode == 0 else "failed"
+        _tasks[task_id]["returncode"] = proc.returncode
+    except Exception as e:
+        _tasks[task_id]["status"] = "failed"
+        _tasks[task_id]["log"] = str(e)
+
+
+@app.post("/api/run/{task_name}")
+def run_task(task_name: str):
+    """触发后台任务"""
+    cfg = TASKS_CONFIG.get(task_name)
+    if not cfg:
+        raise HTTPException(400, f"未知任务: {task_name}，可选: {list(TASKS_CONFIG.keys())}")
+    # 检查是否已有同类型任务在运行
+    for tid, t in _tasks.items():
+        if t["name"] == task_name and t["status"] == "running":
+            return {"task_id": tid, "status": "already_running", "message": f"{cfg['label']} 正在运行中"}
+    task_id = uuid.uuid4().hex[:8]
+    _tasks[task_id] = {
+        "name": task_name, "label": cfg["label"], "status": "pending",
+        "started_at": datetime.now().isoformat(), "log": "", "pid": None,
+    }
+    thread = threading.Thread(target=_run_task, args=(task_id, task_name, cfg["cmd"]), daemon=True)
+    thread.start()
+    logger.info("[Task] 启动 {} (id={})", task_name, task_id)
+    return {"task_id": task_id, "status": "started", "message": f"{cfg['label']} 已启动"}
+
+
+@app.get("/api/tasks")
+def list_tasks():
+    """查看任务状态"""
+    return {
+        "tasks": [
+            {
+                "id": tid, "name": t["name"], "label": t["label"],
+                "status": t["status"], "started_at": t["started_at"],
+                "log": t.get("log", ""),
+            }
+            for tid, t in sorted(_tasks.items(), key=lambda x: x[1].get("started_at", ""), reverse=True)
+        ]
+    }
+

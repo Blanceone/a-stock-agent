@@ -119,6 +119,28 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 .loading { text-align:center; padding:40px; color:var(--muted); }
 .empty { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
 
+/* Action buttons & task panel */
+.action-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
+.action-btn { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:16px; cursor:pointer; text-align:left; transition:all .15s; }
+.action-btn:hover { border-color:var(--accent); background:rgba(59,130,246,0.06); }
+.action-btn:active { transform:scale(0.98); }
+.action-btn .action-icon { font-size:22px; margin-bottom:6px; }
+.action-btn .action-label { font-size:14px; font-weight:600; }
+.action-btn .action-desc { font-size:12px; color:var(--muted); margin-top:4px; }
+.action-btn.running { border-color:var(--yellow); opacity:0.7; pointer-events:none; }
+.action-btn.running .action-label::after { content:' (运行中...)'; color:var(--yellow); font-weight:400; font-size:12px; }
+
+.task-list { margin-top:12px; }
+.task-item { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px; margin-bottom:8px; font-size:13px; }
+.task-item .task-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.task-item .task-name { font-weight:600; }
+.task-item .task-status { font-size:12px; padding:2px 8px; border-radius:10px; }
+.task-item .task-status.running { background:var(--yellow); color:#000; }
+.task-item .task-status.done { background:var(--green); color:#fff; }
+.task-item .task-status.failed { background:var(--red); color:#fff; }
+.task-item .task-status.pending { background:var(--muted); color:#fff; }
+.task-log { background:#0d0f15; border-radius:4px; padding:8px; max-height:150px; overflow-y:auto; font-family:monospace; font-size:11px; color:var(--muted); white-space:pre-wrap; word-break:break-all; margin-top:6px; }
+
 /* Responsive */
 @media(max-width:768px) {
   .sidebar { width:60px; } .sidebar h1 { font-size:0; padding:10px; } .sidebar h1::first-letter { font-size:15px; }
@@ -169,6 +191,7 @@ function loadPage(name) {
 }
 
 // ── Overview ──
+let _taskPollTimer = null;
 async function renderOverview() {
   const c = $('#content');
   c.innerHTML = '<h2 class="page-title">系统概览</h2><div class="loading">加载中...</div>';
@@ -184,14 +207,68 @@ async function renderOverview() {
   html += `<div class="stat-card blue"><div class="label">LLM 缓存</div><div class="value">${s.llm_cache||0}</div><div class="sub">DeepSeek 调用缓存</div></div>`;
   html += '</div>';
 
-  // Quick status
+  // Infrastructure status
   html += '<div class="panel"><div class="panel-title">基础设施状态</div><div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">';
   html += `<span class="badge ${s.pg_error?'badge-st':'badge-approved'}">PostgreSQL ${s.pg_error?'离线':'在线'}</span>`;
   html += `<span class="badge ${(s.chroma_count||0)>0?'badge-approved':'badge-st'}">ChromaDB ${(s.chroma_count||0)>0?'在线':'离线'}</span>`;
   html += `<span class="badge ${s.redis_error?'badge-st':'badge-approved'}">Redis ${s.redis_error?'离线':'在线'}</span>`;
   html += '</div></div>';
 
+  // Action panel
+  html += '<div class="panel"><div class="panel-title">操作面板</div>';
+  html += '<div class="action-grid" id="actionGrid">';
+  html += `<div class="action-btn" onclick="triggerTask('init')" data-task="init"><div class="action-icon">&#9881;</div><div class="action-label">初始化数据</div><div class="action-desc">拉取全A股基础信息入库</div></div>`;
+  html += `<div class="action-btn" onclick="triggerTask('semantic')" data-task="semantic"><div class="action-icon">&#9782;</div><div class="action-label">语义初始化</div><div class="action-desc">主营业务向量化入库 ChromaDB</div></div>`;
+  html += `<div class="action-btn" onclick="triggerTask('static')" data-task="static"><div class="action-icon">&#9733;</div><div class="action-label">静态图谱构建</div><div class="action-desc">产业链分析 + 选股评分</div></div>`;
+  html += `<div class="action-btn" onclick="triggerTask('dynamic')" data-task="dynamic"><div class="action-icon">&#9888;</div><div class="action-label">动态监控</div><div class="action-desc">RSS轮询 + 三共振预警</div></div>`;
+  html += '</div>';
+  html += '<div class="task-list" id="taskList"></div>';
+  html += '</div>';
+
   c.innerHTML = html;
+  pollTasks();
+}
+
+async function triggerTask(name) {
+  try {
+    const r = await fetch(`/api/run/${name}`, {method:'POST'});
+    const d = await r.json();
+    if (d.status === 'already_running') { alert(d.message); return; }
+    pollTasks();
+  } catch(e) { alert('触发失败: ' + e.message); }
+}
+
+let _activeTasks = [];
+async function pollTasks() {
+  const d = await api('/api/tasks');
+  if (!d) return;
+  _activeTasks = d.tasks || [];
+  const el = document.getElementById('taskList');
+  if (!el) return;
+  // Update button running state
+  document.querySelectorAll('.action-btn').forEach(btn => {
+    const taskName = btn.dataset.task;
+    const running = _activeTasks.some(t => t.name === taskName && t.status === 'running');
+    btn.classList.toggle('running', running);
+  });
+  // Render task list
+  if (!_activeTasks.length) { el.innerHTML = ''; return; }
+  let html = '';
+  for (const t of _activeTasks.slice(0, 5)) {
+    const statusMap = {running:'运行中', done:'已完成', failed:'失败', pending:'等待中'};
+    html += `<div class="task-item"><div class="task-header"><span class="task-name">${escHtml(t.label)}</span><span class="task-status ${t.status}">${statusMap[t.status]||t.status}</span></div>`;
+    html += `<div style="color:var(--muted);font-size:12px">启动: ${t.started_at?.substring(11,19)||'-'}</div>`;
+    if (t.log) html += `<div class="task-log">${escHtml(t.log)}</div>`;
+    html += '</div>';
+  }
+  el.innerHTML = html;
+  // Auto-poll if any running
+  if (_taskPollTimer) clearInterval(_taskPollTimer);
+  if (_activeTasks.some(t => t.status === 'running')) {
+    _taskPollTimer = setInterval(pollTasks, 3000);
+  } else {
+    _taskPollTimer = null;
+  }
 }
 
 // ── News ──
@@ -307,6 +384,7 @@ async function renderAlerts() {
   const d = await api('/alerts/today');
   if (!d) { c.innerHTML = '<div class="empty">无法获取预警数据</div>'; return; }
   let html = `<h2 class="page-title">今日预警 (${d.date})</h2>`;
+  html += '<div style="margin-bottom:12px"><button class="btn btn-blue btn-sm" onclick="renderAlerts()">&#8635; 刷新</button></div>';
   if (!d.items.length) { html += '<div class="panel"><div class="empty">今日无三共振预警信号</div></div>'; }
   else {
     html += `<p style="color:var(--muted);margin-bottom:12px">共 ${d.count} 条信号</p>`;

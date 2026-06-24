@@ -168,28 +168,32 @@ def fetch_top_list(trade_date: str) -> pd.DataFrame:
         _handle_tushare_error(e, "top_list", trade_date)
 
 
-# ── 主营业务文本四级降级链 ────────────────────────────────────────────────────
+# ── 主营业务文本两级降级链 ────────────────────────────────────────────────────
 def fetch_business_description(ts_code: str, company_name: str) -> str:
     """
-    主营业务文本，四级降级：
-    L1: 东方财富 F10 核心题材 + 主营介绍
-    L2: a-stock-data 年报经营分析
-    L3: AKShare stock_zygc_em 结构化拼接
-    L4: Tushare pro.stock_company main_business 字段（兜底）
+    主营业务文本，两级降级：
+    L1: 东方财富 F10 核心题材（支持 SH/SZ/BJ）
+    L2: Tushare pro.stock_company main_business 字段（兜底）
     """
     code = ts_code.split(".")[0]
-    market = "1" if ts_code.endswith(".SH") else "0"
+    # 市场后缀映射：SH / SZ / BJ
+    if ts_code.endswith(".SH"):
+        suffix = "SH"
+    elif ts_code.endswith(".BJ"):
+        suffix = "BJ"
+    else:
+        suffix = "SZ"
 
     # L1: 东方财富 F10
     try:
         url = (
             f"https://datacenter.eastmoney.com/securities/api/data/v1/get?"
             f"reportName=RPT_F10_CORETHEME_BOARDTYPE"
-            f"&columns=ALL&filter=(SECUCODE=%22{code}.{'SH' if market == '1' else 'SZ'}%22)"
+            f"&columns=ALL&filter=(SECUCODE=%22{code}.{suffix}%22)"
             f"&pageSize=50&pageNumber=1"
         )
         resp = requests.get(url, timeout=10).json()
-        items = resp.get("result", {}).get("data", [])
+        items = (resp.get("result") or {}).get("data", [])
         if items:
             text = "; ".join(
                 f"{it.get('BOARD_NAME', '')}({it.get('BOARD_TYPE', '')})"
@@ -198,42 +202,17 @@ def fetch_business_description(ts_code: str, company_name: str) -> str:
             logger.debug("[DataFetcher] L1 东财F10 命中: {}", ts_code)
             return f"核心题材：{text}"
     except Exception as e:
-        logger.warning("[DataFallback] ts_code={} api=东财F10 reason={}", ts_code, e)
+        logger.debug("[DataFallback] ts_code={} api=东财F10 reason={}", ts_code, e)
 
-    # L2: a-stock-data 年报经营分析
-    try:
-        import akshare as ak
-        df = ak.stock_zygc_ym(symbol=code)
-        if df is not None and not df.empty:
-            text = "; ".join(df["构成"].dropna().astype(str).tolist()[:5])
-            logger.debug("[DataFetcher] L2 a-stock-data 年报命中: {}", ts_code)
-            return f"经营分析：{text}"
-    except Exception as e:
-        logger.warning("[DataFallback] ts_code={} api=a-stock-data reason={}", ts_code, e)
-
-    # L3: AKShare stock_zygc_em
-    try:
-        import akshare as ak
-        df = ak.stock_zygc_em(symbol=code)
-        if df is not None and not df.empty:
-            text = "; ".join(
-                f"{row.get('主营构成', '')} 占比{row.get('主营收入占比', '')}%"
-                for _, row in df.head(5).iterrows()
-            )
-            logger.debug("[DataFetcher] L3 AKShare 命中: {}", ts_code)
-            return f"主营构成：{text}"
-    except Exception as e:
-        logger.warning("[DataFallback] ts_code={} api=akshare reason={}", ts_code, e)
-
-    # L4: Tushare stock_company main_business（兜底）
+    # L2: Tushare stock_company main_business（兜底）
     try:
         pro = _tushare_pro()
         df = pro.stock_company(ts_code=ts_code, fields="ts_code,main_business")
         if df is not None and not df.empty and df.iloc[0]["main_business"]:
             text = df.iloc[0]["main_business"]
-            logger.debug("[DataFetcher] L4 Tushare兜底 命中: {}", ts_code)
+            logger.debug("[DataFetcher] L2 Tushare兜底 命中: {}", ts_code)
             return f"主营业务：{text}"
     except Exception as e:
-        logger.warning("[DataFallback] ts_code={} api=tushare兜底 reason={}", ts_code, e)
+        logger.debug("[DataFallback] ts_code={} api=tushare兜底 reason={}", ts_code, e)
 
-    raise DataFetchError(f"[business_desc] {ts_code} 四级来源均失败")
+    raise DataFetchError(f"[business_desc] {ts_code} 两级来源均失败")

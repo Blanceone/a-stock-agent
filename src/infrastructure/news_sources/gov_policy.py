@@ -6,7 +6,6 @@ gov_policy.py — 国务院政策库直连 API 源（60 秒轮询）。
 from __future__ import annotations
 
 import hashlib
-import ssl as _ssl
 from datetime import datetime
 from typing import Optional
 

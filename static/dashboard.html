@@ -216,7 +216,7 @@ async function renderOverview() {
   html += '<div class="panel"><div class="panel-title">基础设施状态</div><div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">';
   html += `<span class="badge ${s.pg_error?'badge-st':'badge-approved'}">PostgreSQL ${s.pg_error?'离线':'在线'}</span>`;
   html += `<span class="badge ${(s.chroma_count||0)>0?'badge-approved':'badge-st'}">ChromaDB ${(s.chroma_count||0)>0?'在线':'离线'}</span>`;
-  html += `<span class="badge ${s.redis_error?'badge-st':'badge-approved'}">Redis ${s.redis_error?'离线':'在线'}</span>`;
+  html += `<span class="badge ${s.redis_ok?'badge-approved':'badge-st'}">Redis ${s.redis_ok?'在线':'离线'}</span>`;
   html += '</div></div>';
 
   // Action panel

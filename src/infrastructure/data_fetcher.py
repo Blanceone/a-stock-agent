@@ -8,6 +8,7 @@ data_fetcher.py — 结构化数据降级链。
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -139,16 +140,25 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         f"secid={market}.{code}"
         f"&fields=f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
     )
-    resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
-    data = resp.get("data", {})
-    net_inflow = data.get("f62", 0) or 0
-    net_inflow_pct = (data.get("f184", 0) or 0) / 100
-    return {
-        "ts_code": ts_code,
-        "net_inflow": net_inflow,
-        "net_inflow_pct": net_inflow_pct,
-        "timestamp": datetime.now().isoformat(),
-    }
+    # 重试 2 次（东财 push2 偶发 RemoteDisconnected）
+    last_err = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
+            data = resp.get("data", {})
+            net_inflow = data.get("f62", 0) or 0
+            net_inflow_pct = (data.get("f184", 0) or 0) / 100
+            return {
+                "ts_code": ts_code,
+                "net_inflow": net_inflow,
+                "net_inflow_pct": net_inflow_pct,
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            last_err = e
+            if attempt < 1:
+                time.sleep(0.5)
+    raise last_err
 
 
 def fetch_top_list(trade_date: str) -> pd.DataFrame:

@@ -87,10 +87,14 @@ def run(state: dict) -> dict:
     threshold_capital = settings.resonance_capital_inflow_pct * 100  # 转百分比
     threshold_vr = settings.resonance_volume_ratio
 
-    for ts_code in ts_codes:
+    for i, ts_code in enumerate(ts_codes):
         # 条件1：消息面
         if news_score < threshold_news:
             continue
+
+        # 请求间隔，避免东财 API 限流 (RemoteDisconnected)
+        if i > 0:
+            time.sleep(0.3)
 
         # 条件2：资金面
         flow = _check_capital_flow(ts_code)

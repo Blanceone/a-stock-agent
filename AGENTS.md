@@ -21,6 +21,7 @@ This file provides guidance to Qoder (qoder.com) when working with code in this 
 | 向量存储 | ChromaDB (REST API, bge-small-zh-v1.5 embedding) |
 | 缓存/限流 | Redis (pyredis) |
 | Web API | FastAPI + Uvicorn |
+| 异步 HTTP | aiohttp (新闻源直连 API) |
 | PDF 解析 | PyMuPDF (fitz) |
 | 运行时 | Python 3.11+ |
 | 基建部署 | Docker / docker-compose |
@@ -43,8 +44,13 @@ a_stock_agent/
 ├── src/
 │   ├── infrastructure/         # 数据底座
 │   │   ├── database.py         # PG/ChromaDB/Redis 初始化 + ChromaDB v0.x 兼容层
-│   │   ├── data_fetcher.py     # 数据降级链（Tushare → a-stock-data 东财API）
-│   │   ├── rss_fetcher.py      # RSSHub 财联社电报抓取（NewsItem dataclass）
+│   │   ├── data_fetcher.py     # 数据降级链（东财F10 → Tushare 两级降级）
+│   │   ├── news_sources/       # 多源新闻采集包（直连 API，替代 RSSHub）
+│   │   │   ├── base.py         # NewsItem + NewsSource ABC + NewsAggregator
+│   │   │   ├── cls_telegraph.py # 财联社电报（5s 轮询）
+│   │   │   ├── gov_policy.py   # 国务院政策（60s 轮询）
+│   │   │   └── csrc_policy.py  # 证监会公告（60s 轮询）
+│   │   ├── rss_fetcher.py      # 向后兼容层（re-export NewsItem + poll_rss）
 │   │   ├── searxng_search.py   # SearXNG 搜索封装（Redis 限流）
 │   │   ├── semantic_init.py    # 语义知识库初始化（主营业务 → ChromaDB）
 │   │   └── web_fetcher.py      # 三层降级链（defuddle → Playwright → BS4）
@@ -72,7 +78,9 @@ a_stock_agent/
 │   ├── test_phase4.py          # Phase 4: SOP + Prompt + LLM 工具
 │   ├── test_e2e.py             # E2E 集成测试（25 个，含真实 LLM/API 调用）
 │   └── test_full_chain.py      # 全业务链路测试（9 个，端到端 DAG 执行）
-├── api.py                      # FastAPI SOP 审核接口
+├── api.py                      # FastAPI 接口（SOP审核 + 数据浏览 + 后台任务）
+├── static/
+│   └── dashboard.html          # Web 数据仪表盘（SPA，7页面）
 ├── start.bat                   # 一键启动控制面板（双击运行）
 ├── main.py                     # 系统入口（4 种运行模式）
 └── .env                        # 环境变量（不提交 Git）
@@ -157,7 +165,7 @@ python scripts/start_ssh_tunnels.py
 ### 双流水线设计
 
 - **`static_graph`**（按需触发）：政策 PDF → policy_parser(V4-Pro) → chain_splitter(SearXNG+V4-Pro) → entity_mapper(ChromaDB+V4-Pro+PG) → tech_ranker(K线+indicator_calc)，输出 tier1/tier2 排名股池
-- **`dynamic_graph`**（定时轮询）：新闻 → news_funnel(Flash粗筛+Pro深读) → resonance_alert(三共振检查) → sop_learner(Flash提取→sop_active)，输出预警信号
+- **`dynamic_graph`**（多源聚合 + 定时消费）：NewsAggregator(财联社5s+国务院60s+证监会60s) → Queue → news_funnel(Flash粗筛+Pro深读) → resonance_alert(三共振检查) → sop_learner(Flash提取→sop_active)，输出预警信号。消费间隔 30 秒。
 
 ### 双模型策略
 
@@ -170,12 +178,30 @@ DeepSeek API Base URL: `https://api.deepseek.com/v1`（OpenAI 兼容接口）
 
 ### 数据降级链
 
+**主营业务文本（两级降级）**：
+```
+L1: 东财 F10 datacenter API（支持 SH/SZ/BJ 市场）
+    ↓ 捕获异常（网络超时 / 返回 None）
+L2: Tushare stock_company main_business → 兜底
+```
+
+**行情/财务数据**：
 ```
 Tushare Pro（首选）
     ↓ 捕获异常（积分不足 / 超频）
 a-stock-data 东财 API（补充，需 _EASTMONEY_HEADERS 请求头）
     ↓ 必须在日志中记录降级事件
 ```
+
+### 新闻采集架构（直连 API，绕过 RSSHub）
+
+| 数据源 | 轮询间隔 | API 端点 | 说明 |
+|--------|---------|----------|------|
+| 财联社电报 | **5 秒** | `cls.cn/api/cache?name=telegraph` | 无需鉴权，aiohttp 异步 |
+| 国务院政策 | 60 秒 | `sousuo.www.gov.cn/search-gov/data` | JSON API |
+| 证监会公告 | 60 秒 | `csrc.gov.cn/searchList/{channelId}` | JSON API |
+
+各源独立 `asyncio.Task` 并行轮询，Redis ID 去重（前缀命名空间：`cls:`、`gov:`、`csrc:`），统一推入 `asyncio.Queue` 供消费端处理。
 
 ### ChromaDB 兼容层
 
@@ -187,13 +213,14 @@ ChromaDB 服务端为 v0.5.x（REST API），客户端可能为 v1.x。项目使
 
 | Key 模式 | 用途 | TTL |
 |----------|------|-----|
-| `dedup:news:{article_id}` | 新闻去重 | 24h |
+| `dedup:news:{article_id}` | 新闻去重（带源前缀：cls:/gov:/csrc:） | 7d |
 | `dedup:url:{url_md5}` | URL 正文缓存 | 7d |
 | `llm:{prompt_hash}` | LLM 响应缓存 | 24h |
 | `rate:searxng:{minute_bucket}` | SearXNG 限流 | 2min |
 | `weights:stock:{ts_code}` | 下一代权重 | 30d |
 | `static:stock_pool` | 静态图谱结果 | 7d |
 | `dynamic:alerts:{YYYYMMDD}` | 当日预警 | 3d |
+| `dynamic:news_feed` | 最新消息面（Redis list，保留 500 条） | 永久 |
 
 ### Prompt 模板规范
 
@@ -219,7 +246,7 @@ ChromaDB 服务端为 v0.5.x（REST API），客户端可能为 v1.x。项目使
 `sop_learner.py` 从 `sop_pending` 读取并提取后，写入 `sop_active` 时 **`approved` 必须为 `FALSE`**。所有新战法须经人工在 Web UI 审核批准后才能生效。**严禁**自动将 `approved` 设为 `TRUE`。
 
 ### 4. 信源降级链顺序
-获取行情 / 财务数据时，Tushare 必须首选。只有捕获 Tushare 异常（积分不足 / 超频）之后，才允许 fallback 到 `a-stock-data`，且**必须**在日志中记录降级事件。
+获取主营业务文本时，东财 F10 为首选（支持 SH/SZ/BJ）。只有捕获异常后，才允许 fallback 到 Tushare `stock_company`，且**必须**在日志中记录降级事件（DEBUG 级别）。获取行情/财务数据时，Tushare 必须首选。只有捕获 Tushare 异常（积分不足 / 超频）之后，才允许 fallback 到 `a-stock-data`，且**必须**在日志中记录降级事件。
 
 ### 5. JSON 模板转义
 Prompt 模板中使用 `.format()` 时，JSON 示例的花括号 `{}` 必须转义为 `{{}}`，否则会被 format 解析器误认为占位符导致 `KeyError`。
@@ -279,7 +306,7 @@ git push
 
 | 方式 | 入口 | 适用场景 |
 |------|------|----------|
-| SOP 审核平台 | `http://localhost:8088` | 审核 SOP、查看预警（需 API 服务运行） |
+| Web 仪表盘 | `http://localhost:8088` | 系统概览/消息面/股票库/语义搜索/预警/股池/SOP管理 |
 | 输出查看器 | `python scripts/view_output.py` | 交互式查看全部输出（直连 PG/Redis） |
 | start.bat [8] | 双击 `start.bat` 选 8 | 菜单式快捷查看 |
 | API 接口 | curl / 浏览器 | 程序化访问 |
@@ -375,10 +402,31 @@ python scripts/view_output.py stats
 | `[Main]` | 主进程输出 |
 | `[StaticGraph]` | 静态 DAG 执行日志 |
 | `[DynamicGraph]` | 动态 DAG 执行日志 |
+| `[Aggregator]` | 多源新闻聚合器（启动源、新增条数） |
+| `[NewsSource]` | 单个新闻源拉取失败警告 |
 | `[Scheduler]` | APScheduler 定时任务触发 |
 | `🚨 [RESONANCE ALERT]` | 三共振预警信号 |
 | `[SOP]` | SOP 审核操作日志 |
 | `[DB]` | 数据库初始化/连接日志 |
+| `[Task]` | Web 仪表盘触发的后台任务 |
+
+### Web API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/` | GET | Web 仪表盘首页 |
+| `/api/stats` | GET | 系统统计（PG/ChromaDB/Redis） |
+| `/api/stocks` | GET | 分页股票列表（支持搜索、排序） |
+| `/api/semantic` | GET | ChromaDB 语义搜索 |
+| `/api/stockpool` | GET | 静态图谱股池 |
+| `/api/news` | GET | 最新消息面（Redis list） |
+| `/api/run/{task}` | POST | 触发后台任务（init/semantic/static/dynamic） |
+| `/api/tasks` | GET | 查看任务状态和实时日志 |
+| `/alerts/today` | GET | 今日三共振预警 |
+| `/sop/pending` | GET | 待审核 SOP |
+| `/sop/active` | GET | 已审核 SOP |
+| `/sop/approve/{id}` | POST | 审核通过 |
+| `/sop/reject/{id}` | POST | 审核拒绝 |
 
 ---
 

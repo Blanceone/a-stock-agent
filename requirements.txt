@@ -25,6 +25,7 @@ numpy==1.26.4
 playwright==1.46.0
 requests==2.32.3
 feedparser==6.0.11
+aiohttp>=3.9.0
 
 # PDF 解析
 PyMuPDF==1.24.9

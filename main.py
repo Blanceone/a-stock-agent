@@ -53,21 +53,26 @@ _shared_concepts: list[dict] = []
 async def run_dynamic() -> None:
     """动态监控流水线（APScheduler 定时任务）"""
     global _shared_concepts
-    from src.infrastructure.database import init_all
+    from src.infrastructure.database import init_all, redis_client
     init_all()
 
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
     from src.graphs.dynamic_graph import process_news_item
-    from src.infrastructure.rss_fetcher import poll_rss
+    from src.infrastructure.news_sources import NewsAggregator
+    from src.infrastructure.news_sources.cls_telegraph import CLSTelegraphSource
+    from src.infrastructure.news_sources.gov_policy import GovPolicySource
+    from src.infrastructure.news_sources.csrc_policy import CSRCSource
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
     news_queue: asyncio.Queue = asyncio.Queue()
 
-    # 启动 RSS 轮询后台任务（生产者，持续向 news_queue 推入新闻）
-    # 间隔 300s（5 分钟），与 RSShub 缓存周期一致，是无风险最小间隔
-    asyncio.create_task(poll_rss(news_queue, interval_sec=300))
+    # 启动多源新闻聚合器（生产者）
+    # 财联社 5s + 国务院 60s + 证监会 60s，各自独立轮询
+    sources = [CLSTelegraphSource(), GovPolicySource(), CSRCSource()]
+    aggregator = NewsAggregator(news_queue, sources, redis_client)
+    asyncio.create_task(aggregator.start())
 
     # 定时消费队列中的新闻 → 动态流水线
     async def rss_pipeline_job():
@@ -96,7 +101,8 @@ async def run_dynamic() -> None:
         except Exception as e:
             logger.warning("[Main] 龙虎榜更新失败: {}", e)
 
-    scheduler.add_job(rss_pipeline_job, IntervalTrigger(minutes=5))
+    # 消费频率从 5 分钟提高至 30 秒，配合 5 秒级新闻采集
+    scheduler.add_job(rss_pipeline_job, IntervalTrigger(seconds=30))
     scheduler.add_job(top_list_update_job, CronTrigger(
         day_of_week="mon-fri", hour=15, minute=30
     ))

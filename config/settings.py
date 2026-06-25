@@ -27,6 +27,15 @@ class Settings(BaseSettings):
         "DEFUDDLE_URL", "http://localhost:3000/extract"
     )
 
+    # ── 新闻源直连 API ──────────────────────────────────────────────
+    cls_api_url: str = os.getenv("CLS_API_URL", "https://www.cls.cn/api/cache")
+    cls_poll_interval: float = float(os.getenv("CLS_POLL_INTERVAL", "5"))
+    gov_api_url: str = os.getenv("GOV_API_URL", "https://sousuo.www.gov.cn/search-gov/data")
+    gov_poll_interval: float = float(os.getenv("GOV_POLL_INTERVAL", "60"))
+    csrc_api_url: str = os.getenv("CSRC_API_URL", "https://www.csrc.gov.cn/searchList")
+    csrc_poll_interval: float = float(os.getenv("CSRC_POLL_INTERVAL", "60"))
+    news_consumer_interval: int = int(os.getenv("NEWS_CONSUMER_INTERVAL", "30"))
+
     # ── 模型 ID ───────────────────────────────────────────────
     model_flash: str = "deepseek-chat"    # V4-Flash，高频/粗筛
     model_pro: str = "deepseek-reasoner"  # V4-Pro，深度推理

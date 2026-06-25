@@ -108,6 +108,9 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 .news-item:last-child { border-bottom:none; }
 .news-item .news-time { font-size:12px; color:var(--muted); margin-bottom:4px; display:flex; gap:8px; align-items:center; }
 .news-item .news-time .source-tag { background:var(--accent); color:#fff; padding:1px 6px; border-radius:3px; font-size:11px; }
+.news-item .news-time .source-tag.policy { background:var(--purple); }
+.news-item .news-link { font-size:11px; color:var(--accent); text-decoration:none; margin-left:6px; }
+.news-item .news-link:hover { text-decoration:underline; }
 .news-item .news-title { font-size:14px; font-weight:500; line-height:1.5; }
 .news-item .news-summary { font-size:13px; color:var(--muted); margin-top:6px; line-height:1.6; }
 .news-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
@@ -278,7 +281,7 @@ async function renderNews() {
   const d = await api('/api/news?limit=100');
   if (!d) { c.innerHTML = '<div class="empty">无法连接 API</div>'; return; }
   let html = '<h2 class="page-title">消息面</h2><div class="panel">';
-  html += `<div class="news-toolbar"><div class="info">财联社电报 | 共 ${d.count} 条 | 每 5 分钟更新</div><button class="refresh-btn" onclick="renderNews()">&#8635; 刷新</button></div>`;
+  html += `<div class="news-toolbar"><div class="info">实时消息 | 共 ${d.count} 条 | 多源聚合（财联社/国务院/证监会）</div><button class="refresh-btn" onclick="renderNews()">&#8635; 刷新</button></div>`;
   if (!d.items.length) {
     html += '<div class="empty">暂无新闻数据<br><small>启动动态监控后将自动采集</small></div>';
   } else {
@@ -287,14 +290,17 @@ async function renderNews() {
     for (const n of d.items) {
       const dt = n.pub_time ? new Date(n.pub_time) : null;
       const dateStr = dt ? dt.toLocaleDateString('zh-CN') : '未知日期';
-      const timeStr = dt ? dt.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'}) : '';
+      const timeStr = dt ? dt.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
       if (dateStr !== lastDate) {
         lastDate = dateStr;
         html += `<div style="padding:8px 0;margin-top:8px;border-top:1px solid var(--border);color:var(--accent);font-size:13px;font-weight:600">${dateStr}</div>`;
       }
       const summary = (n.summary||'').replace(/<[^>]*>/g, '').trim();
+      const isPolicy = n.source_type === 'policy';
+      const tagClass = isPolicy ? 'source-tag policy' : 'source-tag';
+      const linkHtml = n.url ? `<a class="news-link" href="${escHtml(n.url)}" target="_blank">[原文]</a>` : '';
       html += `<div class="news-item">
-        <div class="news-time"><span class="source-tag">${escHtml(n.source||'财联社')}</span> ${timeStr}</div>
+        <div class="news-time"><span class="${tagClass}">${escHtml(n.source||'未知')}</span> ${timeStr}${linkHtml}</div>
         <div class="news-title">${escHtml(n.title||'')}</div>
         ${summary ? `<div class="news-summary">${escHtml(summary.substring(0, 300))}</div>` : ''}
       </div>`;

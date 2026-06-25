@@ -40,9 +40,12 @@ class CSRCSource(NewsSource):
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            # 政府网站 SSL 证书链验证常失败，跳过验证
+            conn = aiohttp.TCPConnector(ssl=False)
             self._session = aiohttp.ClientSession(
                 headers=self._HEADERS,
                 timeout=aiohttp.ClientTimeout(total=15),
+                connector=conn,
             )
         return self._session
 

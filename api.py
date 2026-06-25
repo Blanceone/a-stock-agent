@@ -37,7 +37,7 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
-from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, init_all
+from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, ensure_redis, init_all
 
 app = FastAPI(title="A股投研智能体 SOP 审核平台", version="1.0.0")
 
@@ -169,13 +169,14 @@ def reject_sop(sop_id: int):
 @app.get("/alerts/today")
 def get_today_alerts():
     """获取今日三共振预警"""
-    if redis_client is None:
-        return {"count": 0, "items": []}
+    r = ensure_redis()
+    if r is None:
+        return {"count": 0, "items": [], "redis": False}
     today = datetime.now().strftime("%Y%m%d")
     key = f"dynamic:alerts:{today}"
-    items = redis_client.lrange(key, 0, -1)
+    items = r.lrange(key, 0, -1)
     parsed = [json.loads(item) for item in items]
-    return {"date": today, "count": len(parsed), "items": parsed}
+    return {"date": today, "count": len(parsed), "items": parsed, "redis": True}
 
 
 # ── 简易审核页面 ──────────────────────────────────────────────────────────────
@@ -230,15 +231,18 @@ def system_stats():
         stats["chroma_count"] = 0
     # Redis
     try:
-        if redis_client:
+        r = ensure_redis()
+        if r:
             today = datetime.now().strftime("%Y%m%d")
-            stats["alerts_today"] = redis_client.llen(f"dynamic:alerts:{today}") or 0
-            stats["llm_cache"] = len(redis_client.keys("llm:*"))
-            stats["has_stock_pool"] = bool(redis_client.exists("static:stock_pool"))
+            stats["alerts_today"] = r.llen(f"dynamic:alerts:{today}") or 0
+            stats["llm_cache"] = len(r.keys("llm:*"))
+            stats["has_stock_pool"] = bool(r.exists("static:stock_pool"))
+            stats["redis_ok"] = True
         else:
             stats["alerts_today"] = 0
             stats["llm_cache"] = 0
             stats["has_stock_pool"] = False
+            stats["redis_ok"] = False
     except Exception:
         stats["redis_error"] = True
     return stats
@@ -320,14 +324,13 @@ def semantic_search(q: str = Query("", min_length=1), n: int = Query(10, ge=1, l
 @app.get("/api/stockpool")
 def stock_pool():
     """静态图谱股池"""
-    if redis_client is None:
+    r = ensure_redis()
+    if r is None:
         return {"tier1": [], "tier2": [], "redis": False,
                 "hint": "Redis 未连接，无法读取股池数据"}
     try:
-        raw = redis_client.get("static:stock_pool")
+        raw = r.get("static:stock_pool")
         if not raw:
-            # 检查是否有运行记录
-            has_key = redis_client.exists("static:stock_pool")
             return {
                 "tier1": [], "tier2": [], "redis": True,
                 "hint": "股池数据不存在，请先运行「静态图谱构建」生成选股结果",
@@ -347,18 +350,19 @@ def stock_pool():
 def news_feed(limit: int = Query(50, ge=10, le=200)):
     """最新消息面（多源聚合）"""
     from src.infrastructure.database import REDIS_KEY_NEWS_FEED
-    if redis_client is None:
+    r = ensure_redis()
+    if r is None:
         return {"count": 0, "items": [], "redis": False,
                 "hint": "Redis 未连接，请确认 SSH 隧道已启动"}
     try:
-        raw_items = redis_client.lrange(REDIS_KEY_NEWS_FEED, 0, limit - 1)
+        raw_items = r.lrange(REDIS_KEY_NEWS_FEED, 0, limit - 1)
         items = []
-        for r in raw_items:
+        for raw in raw_items:
             try:
-                items.append(json.loads(r))
+                items.append(json.loads(raw))
             except (json.JSONDecodeError, TypeError):
                 continue
-        feed_len = redis_client.llen(REDIS_KEY_NEWS_FEED) or 0
+        feed_len = r.llen(REDIS_KEY_NEWS_FEED) or 0
         return {
             "count": len(items),
             "items": items,

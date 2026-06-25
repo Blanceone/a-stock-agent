@@ -312,6 +312,24 @@ def _init_redis() -> redis.Redis:
     return client
 
 
+def ensure_redis() -> Optional[redis.Redis]:
+    """确保 Redis 可用。如果模块级 redis_client 为 None，尝试重新初始化。
+    成功返回 client，失败返回 None。"""
+    global redis_client
+    if redis_client is not None:
+        try:
+            redis_client.ping()
+            return redis_client
+        except Exception:
+            redis_client = None
+    # 尝试重连
+    try:
+        redis_client = _init_redis()
+        return redis_client
+    except Exception:
+        return None
+
+
 # ── 统一入口 ──────────────────────────────────────────────────────────────────
 def init_all() -> None:
     """
@@ -329,6 +347,10 @@ def init_all() -> None:
         logger.warning("[DB] ChromaDB 初始化失败: {}，语义搜索不可用", e)
         chroma_client, chroma_collection = None, None
 
-    redis_client = _init_redis()
+    try:
+        redis_client = _init_redis()
+    except Exception as e:
+        logger.warning("[DB] Redis 初始化失败: {}，消息/缓存功能不可用", e)
+        redis_client = None
 
     logger.info("[DB] 全部基础设施初始化完成")

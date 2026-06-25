@@ -16,6 +16,7 @@ api.py — SOP 审核 Web API（FastAPI）
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -320,25 +321,52 @@ def semantic_search(q: str = Query("", min_length=1), n: int = Query(10, ge=1, l
 def stock_pool():
     """静态图谱股池"""
     if redis_client is None:
-        return {"tier1": [], "tier2": []}
-    raw = redis_client.get("static:stock_pool")
-    if not raw:
-        return {"tier1": [], "tier2": []}
-    return json.loads(raw)
+        return {"tier1": [], "tier2": [], "redis": False,
+                "hint": "Redis 未连接，无法读取股池数据"}
+    try:
+        raw = redis_client.get("static:stock_pool")
+        if not raw:
+            # 检查是否有运行记录
+            has_key = redis_client.exists("static:stock_pool")
+            return {
+                "tier1": [], "tier2": [], "redis": True,
+                "hint": "股池数据不存在，请先运行「静态图谱构建」生成选股结果",
+            }
+        data = json.loads(raw)
+        t1 = data.get("tier1", [])
+        t2 = data.get("tier2", [])
+        return {
+            "tier1": t1, "tier2": t2, "redis": True,
+            "total": len(t1) + len(t2),
+        }
+    except Exception as e:
+        return {"tier1": [], "tier2": [], "redis": True, "error": str(e)}
 
 
 @app.get("/api/news")
 def news_feed(limit: int = Query(50, ge=10, le=200)):
-    """最新消息面（财联社电报）"""
+    """最新消息面（多源聚合）"""
     from src.infrastructure.database import REDIS_KEY_NEWS_FEED
     if redis_client is None:
-        return {"count": 0, "items": []}
+        return {"count": 0, "items": [], "redis": False,
+                "hint": "Redis 未连接，请确认 SSH 隧道已启动"}
     try:
         raw_items = redis_client.lrange(REDIS_KEY_NEWS_FEED, 0, limit - 1)
-        items = [json.loads(r) for r in raw_items]
-        return {"count": len(items), "items": items}
-    except Exception:
-        return {"count": 0, "items": []}
+        items = []
+        for r in raw_items:
+            try:
+                items.append(json.loads(r))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        feed_len = redis_client.llen(REDIS_KEY_NEWS_FEED) or 0
+        return {
+            "count": len(items),
+            "items": items,
+            "redis": True,
+            "feed_total": feed_len,
+        }
+    except Exception as e:
+        return {"count": 0, "items": [], "redis": True, "error": str(e)}
 
 
 # ── 后台任务管理 ────────────────────────────────────────────────────────────
@@ -358,9 +386,13 @@ def _run_task(task_id: str, task_name: str, cmd: list[str]):
     _tasks[task_id]["status"] = "running"
     _tasks[task_id]["pid"] = None
     try:
+        # Windows 下子进程默认用系统编码(cp936)，强制 UTF-8 避免乱码
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             cwd=str(PROJECT_ROOT), text=True, encoding="utf-8", errors="replace",
+            env=env,
         )
         _tasks[task_id]["pid"] = proc.pid
         lines: list[str] = []

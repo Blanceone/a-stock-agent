@@ -189,6 +189,8 @@ $$('.nav li').forEach(li => {
 });
 
 function loadPage(name) {
+  // 离开概览页时停止任务轮询
+  if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
   const pages = { overview:renderOverview, news:renderNews, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, sop:renderSOP };
   (pages[name] || renderOverview)();
 }
@@ -279,11 +281,20 @@ async function renderNews() {
   const c = $('#content');
   c.innerHTML = '<h2 class="page-title">消息面</h2><div class="panel"><div class="news-toolbar"><div class="info">加载中...</div></div><div class="loading">获取最新消息...</div></div>';
   const d = await api('/api/news?limit=100');
-  if (!d) { c.innerHTML = '<div class="empty">无法连接 API</div>'; return; }
+  if (!d) { c.innerHTML = '<div class="empty">无法连接 API，请确认服务已启动</div>'; return; }
   let html = '<h2 class="page-title">消息面</h2><div class="panel">';
-  html += `<div class="news-toolbar"><div class="info">实时消息 | 共 ${d.count} 条 | 多源聚合（财联社/国务院/证监会）</div><button class="refresh-btn" onclick="renderNews()">&#8635; 刷新</button></div>`;
-  if (!d.items.length) {
-    html += '<div class="empty">暂无新闻数据<br><small>启动动态监控后将自动采集</small></div>';
+  // 状态诊断条
+  if (d.redis === false) {
+    html += `<div style="background:var(--red);color:#fff;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ Redis 未连接 — ${escHtml(d.hint||'请检查 SSH 隧道')}</div>`;
+  }
+  html += `<div class="news-toolbar"><div class="info">实时消息 | 共 ${d.count} 条 | 多源聚合（财联社/国务院/证监会）${d.feed_total ? ' | 缓存 '+d.feed_total+' 条' : ''}</div><button class="refresh-btn" onclick="renderNews()">&#8635; 刷新</button></div>`;
+  if (d.error) {
+    html += `<div class="empty" style="color:var(--red)">读取异常: ${escHtml(d.error)}</div>`;
+  } else if (!d.items.length) {
+    html += `<div class="empty">暂无新闻数据<br><small style="line-height:2">
+      ${d.redis ? '消息 feed 为空，请先启动 <b>动态监控</b> 采集新闻' : ''}
+      <br>在上方操作面板点击「动态监控」或运行 <code>python main.py --mode dynamic</code>
+    </small></div>`;
   } else {
     // Group by date
     let lastDate = '';
@@ -415,9 +426,25 @@ async function renderPool() {
   const d = await api('/api/stockpool');
   if (!d) { c.innerHTML = '<div class="empty">无法获取数据</div>'; return; }
   let html = '<h2 class="page-title">静态图谱选股结果</h2>';
+  // 诊断提示
+  if (d.redis === false) {
+    html += `<div style="background:var(--red);color:#fff;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ Redis 未连接 — ${escHtml(d.hint||'请检查 SSH 隧道')}</div>`;
+  } else if (d.hint) {
+    html += `<div style="background:var(--yellow);color:#000;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ ${escHtml(d.hint)}</div>`;
+  } else if (d.error) {
+    html += `<div style="background:var(--red);color:#fff;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ 读取异常: ${escHtml(d.error)}</div>`;
+  }
   const t1 = d.tier1 || [];
   const t2 = d.tier2 || [];
-  if (!t1.length && !t2.length) { html += '<div class="panel"><div class="empty">尚未运行静态图谱构建<br><small>运行 <code>python main.py --mode static</code> 生成</small></div></div>'; c.innerHTML = html; return; }
+  if (!t1.length && !t2.length) {
+    if (!d.hint && !d.error && d.redis !== false) {
+      html += '<div class="panel"><div class="empty">图谱构建完成但无符合条件的股票<br><small>可能原因：打分阈值过严或候选股池为空，请检查构建日志</small></div></div>';
+    } else if (!html.includes('hint') && !html.includes('异常')) {
+      html += '<div class="panel"><div class="empty">尚未运行静态图谱构建<br><small>在上方操作面板点击「静态图谱构建」或运行 <code>python main.py --mode static --pdf resources/policy.pdf</code></small></div></div>';
+    }
+    c.innerHTML = html; return;
+  }
+  html += `<div style="color:var(--muted);font-size:13px;margin-bottom:12px">共 ${t1.length + t2.length} 只股票入选（第一梯队 ${t1.length} 只 + 第二梯队 ${t2.length} 只）</div>`;
   if (t1.length) {
     html += `<div class="panel"><div class="tier-header">第一梯队 (${t1.length} 只)</div>`;
     for (const s of t1) {

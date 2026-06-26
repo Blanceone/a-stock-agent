@@ -47,6 +47,17 @@ echo  =====================================================
 echo    一键启动 - 完整模式
 echo  =====================================================
 echo.
+echo  [0/3] 清理旧进程...
+taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq API-Server*" /F >nul 2>&1
+for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /fo list 2^>nul ^| findstr "PID:"') do (
+    wmic process where "ProcessId=%%a" get CommandLine 2>nul | findstr /i "main.py --mode dynamic" >nul && (
+        taskkill /PID %%a /F >nul 2>&1
+        echo    已终止旧的动态监控进程
+    )
+)
+echo    旧进程已清理
+echo.
 echo  [1/3] 启动 SSH 隧道 (PG:5432 / Redis:6379 / ChromaDB:8000)...
 start "SSH-Tunnel" cmd /k "python scripts\start_ssh_tunnels.py"
 timeout /t 5 >nul

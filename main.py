@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -82,6 +83,30 @@ async def run_dynamic() -> None:
             result = process_news_item(news_item, _shared_concepts)
             if result.get("concepts_updated"):
                 _shared_concepts = result["concepts_updated"]
+            # 持久化分析结果到 Redis，供仪表盘展示
+            news_result = result.get("news_result")
+            if news_result and redis_client is not None:
+                try:
+                    analysis = {
+                        "news_score": news_result.get("news_score", 0),
+                        "impact_type": news_result.get("impact_type", ""),
+                        "related_ts_codes": json.dumps(
+                            news_result.get("related_ts_codes", []),
+                            ensure_ascii=False,
+                        ),
+                        "new_concept_terms": json.dumps(
+                            news_result.get("new_concept_terms", []),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    redis_client.hset(
+                        "dynamic:news_analysis",
+                        news_item.article_id,
+                        json.dumps(analysis, ensure_ascii=False),
+                    )
+                    redis_client.expire("dynamic:news_analysis", 86400 * 3)
+                except Exception as e:
+                    logger.debug("[Main] 分析结果持久化失败: {}", e)
             for alert in result.get("resonance_alerts", []):
                 logger.warning(
                     "🚨 [预警] {} | {} | 消息{:.2f} 资金{:.1f}% 量比{:.1f}",

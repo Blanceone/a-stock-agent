@@ -113,6 +113,16 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 .news-item .news-link:hover { text-decoration:underline; }
 .news-item .news-title { font-size:14px; font-weight:500; line-height:1.5; }
 .news-item .news-summary { font-size:13px; color:var(--muted); margin-top:6px; line-height:1.6; }
+.news-item .news-analysis { margin-top:8px; padding:8px 10px; background:rgba(59,130,246,0.06); border-radius:6px; border-left:3px solid var(--accent); font-size:12px; line-height:1.6; }
+.news-item .news-analysis .analysis-row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+.news-item .news-analysis .score-badge { display:inline-block; padding:2px 8px; border-radius:10px; font-weight:600; font-size:11px; }
+.news-item .news-analysis .score-high { background:var(--green); color:#fff; }
+.news-item .news-analysis .score-mid { background:var(--yellow); color:#000; }
+.news-item .news-analysis .score-low { background:var(--muted); color:#fff; }
+.news-item .news-analysis .analysis-label { color:var(--muted); }
+.news-item .news-analysis .analysis-value { color:var(--text); }
+.news-item .news-analysis .stock-tag { background:var(--bg); border:1px solid var(--border); padding:1px 6px; border-radius:3px; font-size:11px; color:var(--accent); }
+.news-item .news-analysis.pending { border-left-color:var(--muted); opacity:0.6; }
 .news-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
 .news-toolbar .info { color:var(--muted); font-size:13px; }
 .news-toolbar .refresh-btn { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
@@ -313,8 +323,31 @@ async function renderNews() {
       html += `<div class="news-item">
         <div class="news-time"><span class="${tagClass}">${escHtml(n.source||'未知')}</span> ${timeStr}${linkHtml}</div>
         <div class="news-title">${escHtml(n.title||'')}</div>
-        ${summary ? `<div class="news-summary">${escHtml(summary.substring(0, 300))}</div>` : ''}
-      </div>`;
+        ${summary ? `<div class="news-summary">${escHtml(summary.substring(0, 500))}</div>` : ''}`;
+      // 分析结果
+      const a = n.analysis;
+      if (a) {
+        const score = a.news_score || 0;
+        const scoreCls = score >= 0.7 ? 'score-high' : (score >= 0.4 ? 'score-mid' : 'score-low');
+        const codes = (() => { try { return JSON.parse(a.related_ts_codes || '[]'); } catch(e) { return []; } })();
+        const terms = (() => { try { return JSON.parse(a.new_concept_terms || '[]'); } catch(e) { return []; } })();
+        const impact = a.impact_type || '-';
+        html += `<div class="news-analysis">
+          <div class="analysis-row">
+            <span class="score-badge ${scoreCls}">评分 ${(score*100).toFixed(0)}</span>
+            <span><span class="analysis-label">影响: </span><span class="analysis-value">${escHtml(impact)}</span></span>
+          </div>`;
+        if (codes.length) {
+          html += `<div class="analysis-row" style="margin-top:4px"><span class="analysis-label">关联个股: </span>${codes.slice(0,8).map(c=>`<span class="stock-tag">${escHtml(c)}</span>`).join(' ')}${codes.length>8?'<span class="analysis-label"> +'+(codes.length-8)+'</span>':''}</div>`;
+        }
+        if (terms.length) {
+          html += `<div class="analysis-row" style="margin-top:4px"><span class="analysis-label">概念词: </span><span class="analysis-value">${terms.slice(0,6).map(t=>escHtml(t)).join('、')}</span></div>`;
+        }
+        html += `</div>`;
+      } else {
+        html += `<div class="news-analysis pending"><span class="analysis-label">⏳ 分析排队中...</span></div>`;
+      }
+      html += `</div>`;
     }
   }
   html += '</div>';

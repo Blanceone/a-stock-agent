@@ -348,7 +348,7 @@ def stock_pool():
 
 @app.get("/api/news")
 def news_feed(limit: int = Query(50, ge=10, le=200)):
-    """最新消息面（多源聚合）"""
+    """最新消息面（多源聚合 + 分析结果）"""
     from src.infrastructure.database import REDIS_KEY_NEWS_FEED
     r = ensure_redis()
     if r is None:
@@ -362,6 +362,19 @@ def news_feed(limit: int = Query(50, ge=10, le=200)):
                 items.append(json.loads(raw))
             except (json.JSONDecodeError, TypeError):
                 continue
+        # 合并分析结果（从 Redis hash dynamic:news_analysis 读取）
+        for item in items:
+            aid = item.get("article_id", "")
+            if aid:
+                analysis_raw = r.hget("dynamic:news_analysis", aid)
+                if analysis_raw:
+                    try:
+                        analysis = json.loads(analysis_raw)
+                        item["analysis"] = analysis
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+        # 按 pub_time 倒序（最新排最前）
+        items.sort(key=lambda x: x.get("pub_time", ""), reverse=True)
         feed_len = r.llen(REDIS_KEY_NEWS_FEED) or 0
         return {
             "count": len(items),

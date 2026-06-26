@@ -386,6 +386,74 @@ def news_feed(limit: int = Query(50, ge=10, le=200)):
         return {"count": 0, "items": [], "redis": True, "error": str(e)}
 
 
+@app.get("/api/concepts")
+def concepts_page():
+    """概念词页面：展示所有概念及其关联股票"""
+    r = ensure_redis()
+    if r is None:
+        return {"count": 0, "items": [], "redis": False,
+                "hint": "Redis 未连接，请确认 SSH 隧道已启动"}
+    try:
+        all_concepts = r.hgetall("dynamic:concepts")
+        if not all_concepts:
+            return {"count": 0, "items": [], "redis": True,
+                    "hint": "暂无概念数据，动态监控运行后会自动发现概念"}
+
+        # 解析所有概念
+        items = []
+        for term, raw in all_concepts.items():
+            try:
+                data = json.loads(raw)
+                items.append({
+                    "concept": term,
+                    "stocks": data.get("stocks", []),
+                    "confidence": data.get("confidence", 0),
+                    "last_seen": data.get("last_seen", ""),
+                })
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # 按最后出现时间倒序
+        items.sort(key=lambda x: x.get("last_seen", ""), reverse=True)
+
+        # 批量查询股票名称
+        all_codes = set()
+        for it in items:
+            all_codes.update(it["stocks"])
+        stock_names: dict[str, str] = {}
+        if all_codes:
+            try:
+                conn = get_pg_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT ts_code, name, industry FROM stock_basic WHERE ts_code = ANY(%s)",
+                            (list(all_codes),),
+                        )
+                        for row in cur.fetchall():
+                            stock_names[row[0]] = {"name": row[1], "industry": row[2]}
+                finally:
+                    release_pg_conn(conn)
+            except Exception:
+                pass
+
+        # 将股票名称信息注入到每个概念中
+        for it in items:
+            enriched = []
+            for code in it["stocks"]:
+                info = stock_names.get(code, {})
+                enriched.append({
+                    "ts_code": code,
+                    "name": info.get("name", ""),
+                    "industry": info.get("industry", ""),
+                })
+            it["stocks_detail"] = enriched
+
+        return {"count": len(items), "items": items, "redis": True}
+    except Exception as e:
+        return {"count": 0, "items": [], "redis": True, "error": str(e)}
+
+
 # ── 后台任务管理 ────────────────────────────────────────────────────────────
 
 _tasks: dict[str, dict] = {}  # task_id -> {name, status, started_at, log}

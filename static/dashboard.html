@@ -132,6 +132,18 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 .loading { text-align:center; padding:40px; color:var(--muted); }
 .empty { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
 
+/* Concepts */
+.concept-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px; transition:border-color .15s; }
+.concept-card:hover { border-color:var(--accent); }
+.concept-card .concept-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.concept-card .concept-name { font-size:15px; font-weight:600; color:var(--accent); }
+.concept-card .concept-meta { font-size:12px; color:var(--muted); }
+.concept-card .concept-stocks { display:flex; flex-wrap:wrap; gap:6px; }
+.concept-card .stock-chip { display:inline-flex; align-items:center; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:4px; padding:3px 8px; font-size:12px; }
+.concept-card .stock-chip .chip-code { color:var(--accent); font-weight:500; }
+.concept-card .stock-chip .chip-name { color:var(--text); }
+.concept-card .stock-chip .chip-industry { color:var(--muted); font-size:11px; }
+
 /* Action buttons & task panel */
 .action-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
 .action-btn { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:16px; cursor:pointer; text-align:left; transition:all .15s; }
@@ -174,6 +186,7 @@ tr:hover td { background:rgba(59,130,246,0.04); }
       <li data-page="semantic"><span class="icon">&#9782;</span> 语义搜索</li>
       <li data-page="alerts"><span class="icon">&#9888;</span> 预警信号</li>
       <li data-page="pool"><span class="icon">&#9830;</span> 图谱股池</li>
+      <li data-page="concepts"><span class="icon">&#9827;</span> 概念图谱</li>
       <li data-page="sop"><span class="icon">&#9881;</span> SOP 管理</li>
     </ul>
   </div>
@@ -201,7 +214,7 @@ $$('.nav li').forEach(li => {
 function loadPage(name) {
   // 离开概览页时停止任务轮询
   if (_taskPollTimer) { clearInterval(_taskPollTimer); _taskPollTimer = null; }
-  const pages = { overview:renderOverview, news:renderNews, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, sop:renderSOP };
+  const pages = { overview:renderOverview, news:renderNews, stocks:renderStocks, semantic:renderSemantic, alerts:renderAlerts, pool:renderPool, concepts:renderConcepts, sop:renderSOP };
   (pages[name] || renderOverview)();
 }
 
@@ -495,6 +508,47 @@ async function renderPool() {
       html += `<div class="stock-item"><span class="code">${s.ts_code}</span> <span>${s.name}</span><span class="reason">${escHtml(s.reason||'')}</span><span class="score">${mv}</span></div>`;
     }
     html += '</div>';
+  }
+  c.innerHTML = html;
+}
+
+// ── Concepts ──
+async function renderConcepts() {
+  const c = $('#content');
+  c.innerHTML = '<h2 class="page-title">概念图谱</h2><div class="loading">加载中...</div>';
+  const d = await api('/api/concepts');
+  if (!d) { c.innerHTML = '<div class="empty">无法连接 API</div>'; return; }
+  let html = '<h2 class="page-title">概念图谱</h2>';
+  if (d.redis === false) {
+    html += `<div style="background:var(--red);color:#fff;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ Redis 未连接</div>`;
+  }
+  if (d.hint) {
+    html += `<div style="background:var(--yellow);color:#000;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">${escHtml(d.hint)}</div>`;
+  }
+  html += `<div style="color:var(--muted);font-size:13px;margin-bottom:16px">共 ${d.count} 个概念 | 由 LLM 从新闻中自动发现，关联个股实时更新</div>`;
+  html += '<button class="btn btn-blue btn-sm" onclick="renderConcepts()" style="margin-bottom:16px">&#8635; 刷新</button>';
+  if (!d.items.length) {
+    html += '<div class="panel"><div class="empty">暂无概念数据<br><small>动态监控运行后，LLM 会自动从新闻中发现概念并关联个股</small></div></div>';
+  } else {
+    for (const it of d.items) {
+      const lastSeen = it.last_seen ? new Date(it.last_seen).toLocaleString('zh-CN') : '-';
+      html += `<div class="concept-card">
+        <div class="concept-header">
+          <span class="concept-name">${escHtml(it.concept)}</span>
+          <span class="concept-meta">${it.stocks.length} 只关联股 | 最后出现: ${lastSeen}</span>
+        </div>
+        <div class="concept-stocks">`;
+      const details = it.stocks_detail || [];
+      for (const s of details.slice(0, 20)) {
+        const nameStr = s.name ? ` <span class="chip-name">${escHtml(s.name)}</span>` : '';
+        const indStr = s.industry ? ` <span class="chip-industry">${escHtml(s.industry)}</span>` : '';
+        html += `<span class="stock-chip"><span class="chip-code">${escHtml(s.ts_code)}</span>${nameStr}${indStr}</span>`;
+      }
+      if (details.length > 20) {
+        html += `<span class="stock-chip" style="color:var(--muted)">+${details.length - 20} 更多</span>`;
+      }
+      html += `</div></div>`;
+    }
   }
   c.innerHTML = html;
 }

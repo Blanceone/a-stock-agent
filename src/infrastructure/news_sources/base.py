@@ -66,11 +66,14 @@ class NewsAggregator:
         queue: asyncio.Queue,
         sources: list[NewsSource],
         redis: Optional[object] = None,
+        on_process: Optional[callable] = None,
     ):
         self._queue = queue
         self._sources = sources
         self._redis = redis or redis_client
         self._running = False
+        self._on_process = on_process  # async callback(item) for immediate processing
+        self._semaphore = asyncio.Semaphore(5)  # max 5 concurrent processing tasks
 
     async def start(self) -> None:
         """启动所有源的并行轮询任务"""
@@ -117,8 +120,12 @@ class NewsAggregator:
                             json.dumps(entry, ensure_ascii=False),
                         )
                         self._redis.ltrim(REDIS_KEY_NEWS_FEED, 0, 499)
+                        self._redis.expire(REDIS_KEY_NEWS_FEED, 7 * 86400)  # 7天循环覆盖
                     await self._queue.put(item)
                     new_count += 1
+                    # 立即触发并行处理（不等待定时任务）
+                    if self._on_process:
+                        asyncio.create_task(self._run_process(item))
                 if new_count > 0:
                     logger.debug(
                         "[Aggregator] {} 新增 {} 条（总拉取 {} 条）",
@@ -127,3 +134,11 @@ class NewsAggregator:
             except Exception as e:
                 logger.error("[Aggregator] {} 轮询异常: {}", source.source_name, e)
             await asyncio.sleep(source.interval_sec)
+
+    async def _run_process(self, item: NewsItem) -> None:
+        """带信号量控制的单条新闻处理（并行执行，最多5路）"""
+        async with self._semaphore:
+            try:
+                await self._on_process(item)
+            except Exception as e:
+                logger.warning("[Aggregator] 处理异常 article_id={}: {}", item.article_id, e)

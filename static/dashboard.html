@@ -326,7 +326,7 @@ async function renderNews() {
         ${summary ? `<div class="news-summary">${escHtml(summary.substring(0, 500))}</div>` : ''}`;
       // 分析结果
       const a = n.analysis;
-      if (a) {
+      if (a && a.status === 'analyzed') {
         const score = a.news_score || 0;
         const scoreCls = score >= 0.7 ? 'score-high' : (score >= 0.4 ? 'score-mid' : 'score-low');
         const codes = (() => { try { return JSON.parse(a.related_ts_codes || '[]'); } catch(e) { return []; } })();
@@ -344,6 +344,8 @@ async function renderNews() {
           html += `<div class="analysis-row" style="margin-top:4px"><span class="analysis-label">概念词: </span><span class="analysis-value">${terms.slice(0,6).map(t=>escHtml(t)).join('、')}</span></div>`;
         }
         html += `</div>`;
+      } else if (a && a.status === 'filtered') {
+        html += `<div class="news-analysis pending"><span class="analysis-label">📋 常规消息，未触发深度分析</span></div>`;
       } else {
         html += `<div class="news-analysis pending"><span class="analysis-label">⏳ 分析排队中...</span></div>`;
       }

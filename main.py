@@ -54,8 +54,8 @@ _shared_concepts: list[dict] = []
 async def run_dynamic() -> None:
     """动态监控流水线（APScheduler 定时任务）"""
     global _shared_concepts
-    from src.infrastructure.database import init_all, redis_client
-    init_all()
+    import src.infrastructure.database as db
+    db.init_all()
 
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -72,48 +72,60 @@ async def run_dynamic() -> None:
     # 启动多源新闻聚合器（生产者）
     # 财联社 5s + 国务院 60s + 证监会 60s，各自独立轮询
     sources = [CLSTelegraphSource(), GovPolicySource(), CSRCSource()]
-    aggregator = NewsAggregator(news_queue, sources, redis_client)
+    aggregator = NewsAggregator(news_queue, sources, db.redis_client)
     asyncio.create_task(aggregator.start())
 
     # 定时消费队列中的新闻 → 动态流水线
     async def rss_pipeline_job():
         global _shared_concepts
+        processed = 0
         while not news_queue.empty():
             news_item = await news_queue.get()
-            result = process_news_item(news_item, _shared_concepts)
-            if result.get("concepts_updated"):
-                _shared_concepts = result["concepts_updated"]
-            # 持久化分析结果到 Redis，供仪表盘展示
-            news_result = result.get("news_result")
-            if news_result and redis_client is not None:
-                try:
-                    analysis = {
-                        "news_score": news_result.get("news_score", 0),
-                        "impact_type": news_result.get("impact_type", ""),
-                        "related_ts_codes": json.dumps(
-                            news_result.get("related_ts_codes", []),
-                            ensure_ascii=False,
-                        ),
-                        "new_concept_terms": json.dumps(
-                            news_result.get("new_concept_terms", []),
-                            ensure_ascii=False,
-                        ),
-                    }
-                    redis_client.hset(
-                        "dynamic:news_analysis",
-                        news_item.article_id,
-                        json.dumps(analysis, ensure_ascii=False),
+            try:
+                result = process_news_item(news_item, _shared_concepts)
+                if result.get("concepts_updated"):
+                    _shared_concepts = result["concepts_updated"]
+                # 持久化分析结果到 Redis，供仪表盘展示
+                news_result = result.get("news_result")
+                if db.redis_client is not None:
+                    try:
+                        if news_result:
+                            analysis = {
+                                "status": "analyzed",
+                                "news_score": news_result.get("news_score", 0),
+                                "impact_type": news_result.get("impact_type", ""),
+                                "related_ts_codes": json.dumps(
+                                    news_result.get("related_ts_codes", []),
+                                    ensure_ascii=False,
+                                ),
+                                "new_concept_terms": json.dumps(
+                                    news_result.get("new_concept_terms", []),
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        else:
+                            # 粗筛未通过：也记录状态，避免前端永久显示"排队中"
+                            analysis = {"status": "filtered", "news_score": 0}
+                        db.redis_client.hset(
+                            "dynamic:news_analysis",
+                            news_item.article_id,
+                            json.dumps(analysis, ensure_ascii=False),
+                        )
+                        db.redis_client.expire("dynamic:news_analysis", 86400 * 3)
+                    except Exception as e:
+                        logger.debug("[Main] 分析结果持久化失败: {}", e)
+                processed += 1
+                for alert in result.get("resonance_alerts", []):
+                    logger.warning(
+                        "🚨 [预警] {} | {} | 消息{:.2f} 资金{:.1f}% 量比{:.1f}",
+                        alert["ts_code"], alert["news_title"],
+                        alert["news_score"], alert["capital_inflow_pct"],
+                        alert["volume_ratio"],
                     )
-                    redis_client.expire("dynamic:news_analysis", 86400 * 3)
-                except Exception as e:
-                    logger.debug("[Main] 分析结果持久化失败: {}", e)
-            for alert in result.get("resonance_alerts", []):
-                logger.warning(
-                    "🚨 [预警] {} | {} | 消息{:.2f} 资金{:.1f}% 量比{:.1f}",
-                    alert["ts_code"], alert["news_title"],
-                    alert["news_score"], alert["capital_inflow_pct"],
-                    alert["volume_ratio"],
-                )
+            except Exception as e:
+                logger.warning("[Main] 新闻处理异常 article_id={}: {}", news_item.article_id, e)
+        if processed > 0:
+            logger.info("[Main] 本轮处理 {} 条新闻", processed)
 
     # 盘后龙虎榜：工作日 15:30
     async def top_list_update_job():

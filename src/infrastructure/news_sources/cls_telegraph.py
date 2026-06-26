@@ -53,10 +53,15 @@ class CLSTelegraphSource(NewsSource):
     async def fetch(self) -> list[NewsItem]:
         session = await self._get_session()
         async with session.get(self._API_URL, params=self._PARAMS) as resp:
+            if resp.status != 200:
+                text = await resp.text(errors="replace")
+                logger.warning("[CLS] HTTP {} body={}", resp.status, text[:200])
             resp.raise_for_status()
             data = await resp.json(content_type=None)
 
         roll_data = (data.get("data") or {}).get("roll_data", [])
+        if not roll_data:
+            logger.debug("[CLS] API 返回空 roll_data, keys={}", list((data.get("data") or {}).keys()))
         items: list[NewsItem] = []
         for entry in roll_data:
             entry_id = entry.get("id")

@@ -53,7 +53,8 @@ class NewsSource(ABC):
         try:
             return await self.fetch()
         except Exception as e:
-            logger.warning("[NewsSource] {} 拉取失败: {}", self.source_name, e)
+            err_msg = str(e) or type(e).__name__
+            logger.warning("[NewsSource] {} 拉取失败: {}({})", self.source_name, type(e).__name__, err_msg)
             return []
 
 

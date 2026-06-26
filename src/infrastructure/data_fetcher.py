@@ -140,9 +140,9 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         f"secid={market}.{code}"
         f"&fields=f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
     )
-    # 重试 2 次（东财 push2 偶发 RemoteDisconnected）
+    # 重试 3 次（东财 push2 频繁 RemoteDisconnected，需更长退避）
     last_err = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
             data = resp.get("data", {})
@@ -156,8 +156,8 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
             }
         except Exception as e:
             last_err = e
-            if attempt < 1:
-                time.sleep(0.5)
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))  # 退避: 1s, 2s
     raise last_err
 
 

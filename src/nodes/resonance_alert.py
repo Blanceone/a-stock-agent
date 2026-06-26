@@ -94,7 +94,7 @@ def run(state: dict) -> dict:
 
         # 请求间隔，避免东财 API 限流 (RemoteDisconnected)
         if i > 0:
-            time.sleep(0.3)
+            time.sleep(0.5)
 
         # 条件2：资金面
         flow = _check_capital_flow(ts_code)

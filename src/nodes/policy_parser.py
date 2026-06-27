@@ -20,14 +20,6 @@ from src.infrastructure.database import chroma_collection
 from src.nodes.llm_utils import call_llm_json, load_prompt
 
 
-# ── 宏观空词黑名单 ────────────────────────────────────────────────────────────
-BANNED_WORDS = {
-    "高质量发展", "改革", "创新", "绿色", "智慧城市",
-    "数字化转型", "新质生产力", "现代化", "协调发展",
-    "可持续发展", "创新驱动", "科教兴国",
-}
-
-
 def _extract_toc(pdf_path: str) -> list[dict]:
     """用 PyMuPDF 提取目录大纲"""
     doc = fitz.open(pdf_path)
@@ -100,12 +92,8 @@ def run(state: dict) -> dict:
     concept_prompt = template.split("---")[1].format(section_texts=combined_text[:8000])
     concepts_raw = call_llm_json(concept_prompt, model="pro")
 
-    # 过滤宏观空词
-    concepts = [
-        c for c in concepts_raw
-        if c.get("concept") not in BANNED_WORDS
-        and not any(bw in c.get("concept", "") for bw in BANNED_WORDS)
-    ]
+    # 直接使用 LLM 返回结果（prompt 中已包含空词过滤指令）
+    concepts = [c for c in concepts_raw if c.get("concept")]
     logger.info("[policy_parser] 提取概念词: {} 个", len(concepts))
     for c in concepts:
         logger.debug("  - {} (置信度: {}, 来源: {})",

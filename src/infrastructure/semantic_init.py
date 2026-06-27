@@ -95,10 +95,10 @@ def _get_known_concepts() -> list[str]:
         return []
 
 
-def _classify_concepts(name: str, ts_code: str, summary: str, concept_list: list[str]) -> list[str]:
-    """V4-Flash 概念分类：从已有概念列表中选取匹配项"""
+def _classify_concepts(name: str, ts_code: str, summary: str, concept_list: list[str]) -> tuple[list[str], float]:
+    """V4-Flash 概念分类：从已有概念列表中选取匹配项，返回 (概念列表, 置信度)"""
     if not concept_list:
-        return []
+        return [], 0.0
     try:
         prompt_text = _CONCEPT_CLASSIFY_PROMPT_PATH.read_text(encoding="utf-8")
         prompt = prompt_text.format(
@@ -108,15 +108,16 @@ def _classify_concepts(name: str, ts_code: str, summary: str, concept_list: list
         raw = call_llm(prompt, model="flash", system="你是A股概念分类助手。", max_tokens=256)
         data = _json.loads(raw.strip())
         result = data.get("concepts", [])
+        confidence = float(data.get("confidence", 0.5))
         # 只保留确实在已知列表中的概念
         valid_set = set(concept_list)
-        return [c for c in result if c in valid_set][:5]
+        return [c for c in result if c in valid_set], confidence
     except Exception as e:
         logger.debug("[SemanticInit] 概念分类失败 {}/{}: {}", ts_code, name, e)
-        return []
+        return [], 0.0
 
 
-def _persist_llm_concepts(redis_client, concepts: list[str], ts_code: str, name: str):
+def _persist_llm_concepts(redis_client, concepts: list[str], ts_code: str, name: str, confidence: float = 0.5):
     """将 LLM 分类结果写入 Redis dynamic:concepts（source=llm_classify）"""
     if not redis_client or not concepts:
         return
@@ -151,7 +152,7 @@ def _persist_llm_concepts(redis_client, concepts: list[str], ts_code: str, name:
                     "stocks": stocks_list,
                     "stocks_detail": stocks_detail,
                     "sources": list(concept_sources_set),
-                    "confidence": 0.8,
+                    "confidence": confidence,
                     "last_seen": now,
                 }, ensure_ascii=False),
             )
@@ -221,11 +222,11 @@ def run() -> dict:
         # LLM 概念分类（与 tushare/akshare 取并集）
         if known_concepts:
             try:
-                llm_concepts = _classify_concepts(name, ts_code, summary, known_concepts)
+                llm_concepts, confidence = _classify_concepts(name, ts_code, summary, known_concepts)
                 if llm_concepts:
-                    _persist_llm_concepts(database.redis_client, llm_concepts, ts_code, name)
+                    _persist_llm_concepts(database.redis_client, llm_concepts, ts_code, name, confidence)
                     stats["concept_classified"] += 1
-                    logger.debug("[SemanticInit] {} {} 分类到: {}", ts_code, name, llm_concepts)
+                    logger.debug("[SemanticInit] {} {} 分类到: {} (confidence={:.2f})", ts_code, name, llm_concepts, confidence)
             except Exception as e:
                 logger.debug("[SemanticInit] 概念分类异常 {}: {}", ts_code, e)
 

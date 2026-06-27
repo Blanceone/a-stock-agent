@@ -163,6 +163,137 @@ def _parse_json(raw: str) -> Any:
         raise
 
 
+# ── Tool-Call 工具定义 ─────────────────────────────────────────────────────────
+
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "搜索互联网获取最新信息、概念含义、行业动态、政策背景等",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词，应尽量精准",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "返回结果数量，默认5",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+DEFAULT_TOOLS = [WEB_SEARCH_TOOL]
+
+
+def _execute_tool(name: str, args: dict) -> str:
+    """执行工具调用，返回 JSON 字符串"""
+    if name == "web_search":
+        try:
+            from src.infrastructure.searxng_search import search
+            results = search(args["query"], num_results=args.get("num_results", 5))
+            return json.dumps(
+                [{"title": r.title, "snippet": r.snippet, "url": r.url} for r in results],
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+    return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+
+
+# ── Tool-Call LLM 调用 ─────────────────────────────────────────────────────────
+
+def call_llm_with_tools(
+    prompt: str,
+    *,
+    tools: list[dict] | None = None,
+    max_rounds: int = 5,
+    model: str = "flash",
+    system: str = "你是一位专业的A股投研分析师。你可以使用工具搜索信息，最终仅输出 JSON。",
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+    use_cache: bool = True,
+) -> Any:
+    """
+    带 tool-call 的 LLM 调用。
+
+    流程：LLM → tool_calls → 执行工具 → 结果回传 → LLM → ... → 最终回答
+    最多 max_rounds 轮工具调用，防止死循环。
+    返回解析后的 JSON（dict 或 list）。
+    """
+    if tools is None:
+        tools = DEFAULT_TOOLS
+
+    model_id = settings.model_flash if model == "flash" else settings.model_pro
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+
+    client = _get_client()
+
+    for round_num in range(max_rounds):
+        logger.debug("[LLM-Tools] round={} model={} messages={}", round_num, model_id, len(messages))
+
+        resp = client.chat.completions.create(
+            model=model_id,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+        msg = resp.choices[0].message
+
+        # 无 tool_calls → 最终回答
+        if not msg.tool_calls:
+            content = (msg.content or "").strip()
+            logger.debug("[LLM-Tools] 最终回答（{} 轮）len={}", round_num + 1, len(content))
+            return _parse_json(content)
+
+        # 有 tool_calls → 执行工具并回传结果
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ],
+        })
+
+        for tc in msg.tool_calls:
+            fn_name = tc.function.name
+            try:
+                fn_args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                fn_args = {}
+
+            logger.info("[LLM-Tools] 调用工具: {}({})", fn_name, fn_args.get("query", ""))
+            result = _execute_tool(fn_name, fn_args)
+            logger.debug("[LLM-Tools] 工具结果 len={}", len(result))
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    # 超过 max_rounds 仍未得到最终回答，取最后一次内容
+    logger.warning("[LLM-Tools] 超过 {} 轮工具调用限制", max_rounds)
+    last_content = messages[-1].get("content", "{}")
+    return _parse_json(last_content)
+
+
 # ── Prompt 模板加载 ────────────────────────────────────────────────────────────
 _PROMPT_DIR = Path(__file__).parent.parent.parent / "config" / "prompts"
 

@@ -1,5 +1,5 @@
 """
-resonance_alert.py — 步骤6：三共振条件触发与预警
+resonance_alert.py — 步骤6：多因子共振触发与预警（LLM 综合判断）
 
 输入 state:
   news_result: dict              # 来自 news_funnel（粗筛通过的新闻）
@@ -9,10 +9,10 @@ resonance_alert.py — 步骤6：三共振条件触发与预警
   resonance_alerts: list[dict]   # 预警信号列表
   capital_flow_cache: dict       # 更新后的资金流缓存
 
-三共振条件（全部满足才预警）:
-  1. 消息面评分 > resonance_news_score_threshold (默认 0.7)
-  2. 主力净流入占成交额比例 > resonance_capital_inflow_pct (默认 2%)
-  3. 量比 > resonance_volume_ratio (默认 2.0)
+判断方式：
+  1. 收集所有关联股票的 news_score + 资金流 + 量比
+  2. LLM flash 综合判断是否预警（不再使用硬编码三阈值 AND）
+  3. 降级：LLM 失败时回退旧版三阈值 AND 逻辑
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from loguru import logger
 from config.settings import settings
 from src.infrastructure.data_fetcher import fetch_moneyflow_intraday
 from src.infrastructure.database import redis_client
+from src.nodes.llm_utils import call_llm_json, load_prompt
 from src.tools.indicator_calc import calc_volume_ratio
 
 
@@ -35,7 +36,6 @@ def _check_capital_flow(ts_code: str) -> dict:
     """
     try:
         data = fetch_moneyflow_intraday(ts_code)
-        # fetch_moneyflow_intraday 返回 dict: {ts_code, net_inflow, net_inflow_pct, timestamp}
         net_inflow = data.get("net_inflow", 0)
         net_inflow_pct = data.get("net_inflow_pct", 0)
 
@@ -59,11 +59,69 @@ def _check_volume_ratio(ts_code: str) -> float:
         df = fetch_daily(ts_code, start_date, end_date)
         if df.empty or len(df) < 10:
             return 0
-        df = calc_volume_ratio(df)  # 返回 DataFrame 追加 vol_ratio 列
+        df = calc_volume_ratio(df)
         return float(df.iloc[-1].get("vol_ratio", 0))
     except Exception as e:
         logger.warning("[resonance] 量比计算失败 ts_code={} reason={}", ts_code, e)
         return 0
+
+
+def _collect_stock_data(ts_codes: list[str]) -> list[dict]:
+    """收集所有关联股票的多因子数据"""
+    stock_data = []
+    for i, ts_code in enumerate(ts_codes):
+        if i > 0:
+            time.sleep(0.5)  # 东财 API 限流保护
+
+        flow = _check_capital_flow(ts_code)
+        vr = _check_volume_ratio(ts_code)
+
+        stock_data.append({
+            "ts_code": ts_code,
+            "capital_inflow_pct": flow["inflow_pct"],
+            "net_buy_amt": flow["net_buy_amt"],
+            "volume_ratio": round(vr, 2),
+        })
+    return stock_data
+
+
+def _llm_judge(news_title: str, news_score: float, stock_data: list[dict]) -> list[dict]:
+    """LLM flash 综合判断是否预警"""
+    template = load_prompt("resonance_judge")
+    prompt = template.format(
+        news_title=news_title,
+        news_score=f"{news_score:.2f}",
+        stocks_data=json.dumps(stock_data, ensure_ascii=False),
+    )
+    try:
+        result = call_llm_json(prompt, model="flash", max_tokens=2048)
+        if isinstance(result, list):
+            return result
+        return []
+    except Exception as e:
+        logger.warning("[resonance] LLM 综合判断失败: {}", e)
+        return []
+
+
+def _fallback_judge(news_score: float, stock_data: list[dict]) -> list[dict]:
+    """降级：旧版三阈值 AND 逻辑"""
+    threshold_news = settings.resonance_news_score_threshold
+    threshold_capital = settings.resonance_capital_inflow_pct * 100
+    threshold_vr = settings.resonance_volume_ratio
+
+    alerts = []
+    if news_score < threshold_news:
+        return alerts
+
+    for sd in stock_data:
+        if sd["capital_inflow_pct"] >= threshold_capital and sd["volume_ratio"] >= threshold_vr:
+            alerts.append({
+                "ts_code": sd["ts_code"],
+                "alert": True,
+                "confidence": 0.7,
+                "reason": f"三阈值AND降级: 消息{news_score:.2f} 资金{sd['capital_inflow_pct']:.1f}% 量比{sd['volume_ratio']:.1f}",
+            })
+    return alerts
 
 
 def run(state: dict) -> dict:
@@ -79,50 +137,46 @@ def run(state: dict) -> dict:
         logger.debug("[resonance] 无关联个股，跳过")
         return {"resonance_alerts": []}
 
-    logger.info("[resonance] 检查 {} 只股票三共振条件 news_score={:.2f}",
+    logger.info("[resonance] 检查 {} 只股票多因子共振 news_score={:.2f}",
                 len(ts_codes), news_score)
 
+    # 1. 收集所有股票的多因子数据
+    stock_data = _collect_stock_data(ts_codes)
+
+    # 2. LLM 综合判断（失败则降级）
+    llm_results = _llm_judge(news_title, news_score, stock_data)
+    if not llm_results:
+        logger.info("[resonance] LLM 判断为空，降级为三阈值 AND")
+        llm_results = _fallback_judge(news_score, stock_data)
+
+    # 3. 构建预警列表
     alerts: list[dict] = []
-    threshold_news = settings.resonance_news_score_threshold
-    threshold_capital = settings.resonance_capital_inflow_pct * 100  # 转百分比
-    threshold_vr = settings.resonance_volume_ratio
-
-    for i, ts_code in enumerate(ts_codes):
-        # 条件1：消息面
-        if news_score < threshold_news:
+    for item in llm_results:
+        if not item.get("alert", False):
             continue
 
-        # 请求间隔，避免东财 API 限流 (RemoteDisconnected)
-        if i > 0:
-            time.sleep(0.5)
+        ts_code = item.get("ts_code", "")
+        # 找到对应的 stock_data
+        sd = next((s for s in stock_data if s["ts_code"] == ts_code), {})
 
-        # 条件2：资金面
-        flow = _check_capital_flow(ts_code)
-        if flow["inflow_pct"] < threshold_capital:
-            continue
-
-        # 条件3：技术面
-        vr = _check_volume_ratio(ts_code)
-        if vr < threshold_vr:
-            continue
-
-        # 三共振满足
         alert = {
             "ts_code": ts_code,
             "news_title": news_title,
             "news_score": news_score,
-            "capital_inflow_pct": flow["inflow_pct"],
-            "volume_ratio": round(vr, 2),
+            "capital_inflow_pct": sd.get("capital_inflow_pct", 0),
+            "volume_ratio": sd.get("volume_ratio", 0),
+            "confidence": item.get("confidence", 0.5),
+            "reason": item.get("reason", ""),
             "timestamp": int(time.time()),
         }
         alerts.append(alert)
         logger.warning(
-            "🚨 [RESONANCE ALERT] {} | 消息{:.2f} 资金{:.1f}% 量比{:.1f} | {}",
-            ts_code, news_score, flow["inflow_pct"], vr, news_title,
+            "🚨 [RESONANCE ALERT] {} | conf={:.2f} | {} | {}",
+            ts_code, alert["confidence"], alert["reason"], news_title,
         )
 
     if not alerts:
-        logger.info("[resonance] 无三共振信号")
+        logger.info("[resonance] 无共振信号")
 
     # 持久化到 Redis: dynamic:alerts:{date}
     if alerts and redis_client is not None:

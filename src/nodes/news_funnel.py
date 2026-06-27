@@ -82,7 +82,8 @@ def run(state: dict) -> dict:
         return {"news_result": None, "concepts_updated": concepts}
 
     news_score = coarse.get("news_score", 0)
-    if news_score < 0.4:
+    is_relevant = coarse.get("is_relevant", True)
+    if not is_relevant:
         logger.debug("[news_funnel] 粗筛未通过 score={:.2f}: {}", news_score, title)
         return {"news_result": None, "concepts_updated": concepts}
 

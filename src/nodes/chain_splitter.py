@@ -10,22 +10,49 @@ chain_splitter.py — 步骤2：产业链深度拆解
 """
 from __future__ import annotations
 
+import json
+
 from loguru import logger
 
 from src.infrastructure.searxng_search import search
 from src.infrastructure.web_fetcher import fetch_article
-from src.nodes.llm_utils import call_llm_json, load_prompt
+from src.nodes.llm_utils import call_llm_json, call_llm_with_tools, load_prompt
 
 # 每个概念最多搜索和抓取的研报数量
 MAX_REPORTS_PER_CONCEPT = 5
 MAX_TEXT_PER_REPORT = 4000  # 字符数上限
 
 
-def _search_reports(concept: str) -> list[str]:
-    """通过 SearXNG 搜索研报 URL"""
-    query = f"{concept} 产业链 研报"
-    results = search(query, num_results=MAX_REPORTS_PER_CONCEPT)
-    return [r.url for r in results if r.url]
+def _search_reports_with_llm(concept: str) -> list[str]:
+    """通过 LLM tool-call 智能搜索研报 URL（LLM 自主决定搜索关键词）"""
+    prompt = f"""请搜索与A股概念「{concept}」相关的研究报告或行业分析文章。
+你需要：
+1. 使用 web_search 工具搜索（可以尝试不同关键词组合）
+2. 从搜索结果中选取最有价值的 URL（优先选券商研报、行业深度分析）
+3. 返回选中的 URL 列表
+
+输出 JSON：
+{{"urls": ["url1", "url2", ...], "search_queries_used": ["关键词1", ...]}}"""
+
+    try:
+        result = call_llm_with_tools(
+            prompt,
+            model="flash",
+            system="你是A股研报搜索助手。使用 web_search 工具搜索，最终仅输出 JSON。",
+            max_rounds=3,
+            max_tokens=2048,
+        )
+        urls = result.get("urls", []) if isinstance(result, dict) else []
+        queries = result.get("search_queries_used", []) if isinstance(result, dict) else []
+        if queries:
+            logger.debug("[chain_splitter] LLM 搜索关键词: {}", queries)
+        return [u for u in urls if u][:MAX_REPORTS_PER_CONCEPT]
+    except Exception as e:
+        logger.warning("[chain_splitter] LLM 搜索失败: {}，降级为固定模板", e)
+        # 降级：固定搜索模板
+        query = f"{concept} 产业链 研报"
+        results = search(query, num_results=MAX_REPORTS_PER_CONCEPT)
+        return [r.url for r in results if r.url]
 
 
 def _fetch_report_texts(urls: list[str]) -> list[str]:
@@ -64,7 +91,7 @@ def run(state: dict) -> dict:
         logger.info("[chain_splitter] 拆解概念: {}", concept)
 
         # 1. 搜索研报
-        urls = _search_reports(concept)
+        urls = _search_reports_with_llm(concept)
         logger.debug("[chain_splitter] 搜索到 {} 个 URL", len(urls))
 
         # 2. 抓取正文

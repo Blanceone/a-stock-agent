@@ -169,10 +169,7 @@ class TestStaticPipeline:
         # 检查概念词结构
         for c in concepts:
             assert "concept" in c, f"概念词应含 concept 字段: {c}"
-        # 宏观空词应被过滤
-        from src.nodes.policy_parser import BANNED_WORDS
-        for c in concepts:
-            assert c["concept"] not in BANNED_WORDS, f"宏观空词未被过滤: {c['concept']}"
+            assert c["concept"], f"concept 字段不应为空: {c}"
 
     def test_chain_splitter_with_concepts(self):
         """chain_splitter: 概念词 → 产业链拆解"""

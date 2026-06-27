@@ -66,7 +66,7 @@ def _llm_score(node_name: str, node_desc: str, candidates: list[dict]) -> list[d
         try:
             batch_scores = call_llm_json(prompt, model="pro", max_tokens=2048)
             for s in batch_scores:
-                if s.get("score", 0) >= settings.entity_llm_score_threshold:
+                if s.get("keep", s.get("score", 0) >= settings.entity_llm_score_threshold):
                     scored.append(s)
         except Exception as e:
             logger.warning("[entity_mapper] LLM打分批次失败 reason={}", e)

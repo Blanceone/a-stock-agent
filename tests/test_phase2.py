@@ -19,36 +19,44 @@ import pytest
 
 # ── 1. policy_parser 空词过滤 ────────────────────────────────────────────────
 class TestPolicyParser:
-    def test_banned_words_filter(self):
-        """宏观空词黑名单应过滤"""
-        from src.nodes.policy_parser import BANNED_WORDS
-        assert "高质量发展" in BANNED_WORDS
-        assert "改革" in BANNED_WORDS
-        assert "创新" in BANNED_WORDS
-        assert "新质生产力" in BANNED_WORDS
+    def test_empty_concept_filtered(self):
+        """concept 字段为空的条目应被过滤（信任 LLM prompt，代码仅过滤空值）"""
+        # 模拟 LLM 返回的 concepts_raw
+        concepts_raw = [
+            {"concept": "固态电池", "source_section": "第1章", "confidence": 0.9},
+            {"concept": "", "source_section": "第1章", "confidence": 0.5},
+            {"concept": None, "source_section": "第1章", "confidence": 0.3},
+            {"source_section": "第1章", "confidence": 0.2},  # 缺少 concept 字段
+        ]
+        # 与 policy_parser.py 中相同的过滤逻辑
+        concepts = [c for c in concepts_raw if c.get("concept")]
+        assert len(concepts) == 1
+        assert concepts[0]["concept"] == "固态电池"
 
     @patch("src.nodes.policy_parser.call_llm_json")
     @patch("src.nodes.policy_parser._extract_toc")
     @patch("src.nodes.policy_parser._extract_section_texts")
     @patch("src.nodes.policy_parser._store_policy_chunks")
-    def test_run_filters_banned_concepts(self, mock_store, mock_texts, mock_toc, mock_llm):
-        """run() 应过滤掉黑名单概念词"""
+    def test_run_filters_empty_concepts(self, mock_store, mock_texts, mock_toc, mock_llm):
+        """run() 应过滤掉 concept 字段为空的条目"""
         mock_toc.return_value = [{"level": 1, "title": "第一章", "page": 1}]
         mock_texts.return_value = {1: "这是测试文本"}
         mock_llm.side_effect = [
             {"key_sections": [1]},  # 第一次调用：圈定章节
             [
                 {"concept": "固态电池", "source_section": "第1章", "confidence": 0.9},
-                {"concept": "高质量发展", "source_section": "第1章", "confidence": 0.8},
+                {"concept": "", "source_section": "第1章", "confidence": 0.3},  # 空概念应被过滤
                 {"concept": "人形机器人", "source_section": "第1章", "confidence": 0.85},
             ],
         ]
         from src.nodes.policy_parser import run
         result = run({"policy_pdf_path": "/tmp/test.pdf"})
         concepts = result["concepts"]
-        # "高质量发展" 应被过滤
-        assert all(c["concept"] not in ["高质量发展", "改革", "创新"] for c in concepts)
+        # 空 concept 应被过滤
+        assert all(c["concept"] for c in concepts)
         assert any(c["concept"] == "固态电池" for c in concepts)
+        assert any(c["concept"] == "人形机器人" for c in concepts)
+        assert len(concepts) == 2
 
 
 # ── 2. entity_mapper 无ST ────────────────────────────────────────────────────

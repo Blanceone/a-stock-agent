@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # ── 实体映射过滤条件 ─────────────────────────────────────
     entity_chroma_top_k: int = 30                 # ChromaDB 召回候选数
     entity_llm_score_threshold: float = 0.6       # LLM 相关性打分下限
-    entity_max_circ_mv: float = 2_000_000.0       # 流通市值上限（万元）= 200亿
+    entity_max_circ_mv: float = 5_000_000.0       # 流通市值上限（万元）= 500亿
 
     # ── 技术面多因子权重 ─────────────────────────────────────
     tech_weight_ma_alignment: float = 0.40

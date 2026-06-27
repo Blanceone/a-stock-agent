@@ -347,7 +347,32 @@ async def run_dynamic() -> None:
     async def process_single_news(item):
         """在线程池中运行 LLM 流水线，结果写入 Redis"""
         global _shared_concepts
-        result = await asyncio.to_thread(process_news_item, item, _shared_concepts)
+        # 先标记为"处理中"，让前端区分排队/处理中
+        if db.redis_client is not None:
+            try:
+                db.redis_client.hset(
+                    "dynamic:news_analysis",
+                    item.article_id,
+                    json.dumps({"status": "processing"}, ensure_ascii=False),
+                )
+            except Exception:
+                pass
+        try:
+            result = await asyncio.to_thread(process_news_item, item, _shared_concepts)
+        except Exception as e:
+            logger.error("[Main] 新闻处理异常 article_id={}: {}", item.article_id, e, exc_info=True)
+            # 异常时也写入状态，避免永远卡在"排队中"
+            if db.redis_client is not None:
+                try:
+                    db.redis_client.hset(
+                        "dynamic:news_analysis",
+                        item.article_id,
+                        json.dumps({"status": "error", "error_msg": str(e)[:200]}, ensure_ascii=False),
+                    )
+                    db.redis_client.expire("dynamic:news_analysis", 7 * 86400)
+                except Exception:
+                    pass
+            return
 
         # 更新内存中的概念词库（CPython list 赋值是原子的）
         concepts_updated = result.get("concepts_updated")

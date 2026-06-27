@@ -429,6 +429,10 @@ async function renderNews() {
         html += `</div>`;
       } else if (a && a.status === 'filtered') {
         html += `<div class="news-analysis pending"><span class="analysis-label">📋 常规消息，未触发深度分析</span></div>`;
+      } else if (a && a.status === 'error') {
+        html += `<div class="news-analysis pending"><span class="analysis-label" style="color:var(--red)">⚠ 分析失败: ${escHtml(a.error_msg || '未知错误')}</span></div>`;
+      } else if (a && a.status === 'processing') {
+        html += `<div class="news-analysis pending"><span class="analysis-label" style="color:var(--accent)">🔄 正在分析中...</span></div>`;
       } else {
         html += `<div class="news-analysis pending"><span class="analysis-label">⏳ 分析排队中...</span></div>`;
       }

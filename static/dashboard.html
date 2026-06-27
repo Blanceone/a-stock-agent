@@ -279,6 +279,7 @@ async function renderOverview() {
   html += `<div class="action-btn" onclick="triggerTask('semantic')" data-task="semantic"><div class="action-icon">&#9782;</div><div class="action-label">语义初始化</div><div class="action-desc">主营业务向量化入库 ChromaDB</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('static')" data-task="static"><div class="action-icon">&#9733;</div><div class="action-label">静态图谱构建</div><div class="action-desc">产业链分析 + 选股评分</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('dynamic')" data-task="dynamic"><div class="action-icon">&#9888;</div><div class="action-label">动态监控</div><div class="action-desc">RSS轮询 + 三共振预警</div></div>`;
+  html += `<div class="action-btn" onclick="shutdownAll()" style="border-color:var(--red);opacity:0.85"><div class="action-icon" style="color:var(--red)">&#9211;</div><div class="action-label" style="color:var(--red)">安全关闭</div><div class="action-desc">停止所有后台任务和 SSH 隧道</div></div>`;
   html += '</div>';
   html += '<div class="task-list" id="taskList"></div>';
   html += '</div>';
@@ -294,6 +295,16 @@ async function triggerTask(name) {
     if (d.status === 'already_running') { alert(d.message); return; }
     pollTasks();
   } catch(e) { alert('触发失败: ' + e.message); }
+}
+
+async function shutdownAll() {
+  if (!confirm('确定要安全关闭所有后台任务和 SSH 隧道吗？')) return;
+  try {
+    const r = await fetch('/api/shutdown', {method:'POST'});
+    const d = await r.json();
+    alert(d.message || '关闭完成');
+    pollTasks();
+  } catch(e) { alert('关闭请求失败: ' + e.message); }
 }
 
 let _activeTasks = [];
@@ -313,7 +324,7 @@ async function pollTasks() {
   if (!_activeTasks.length) { el.innerHTML = ''; return; }
   let html = '';
   for (const t of _activeTasks.slice(0, 5)) {
-    const statusMap = {running:'运行中', done:'已完成', failed:'失败', pending:'等待中'};
+    const statusMap = {running:'运行中', done:'已完成', failed:'失败', pending:'等待中', stopped:'已停止'};
     html += `<div class="task-item"><div class="task-header"><span class="task-name">${escHtml(t.label)}</span><span class="task-status ${t.status}">${statusMap[t.status]||t.status}</span></div>`;
     html += `<div style="color:var(--muted);font-size:12px">启动: ${t.started_at?.substring(11,19)||'-'}</div>`;
     if (t.log) html += `<div class="task-log">${escHtml(t.log)}</div>`;

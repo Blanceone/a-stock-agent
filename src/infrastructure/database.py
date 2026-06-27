@@ -37,22 +37,51 @@ CREATE INDEX IF NOT EXISTS idx_stock_basic_mv ON stock_basic(circ_mv);
 
 CREATE TABLE IF NOT EXISTS sop_pending (
     id             SERIAL PRIMARY KEY,
-    graph_json     JSONB       NOT NULL,          -- V4-Flash 提取的 SOP 操作图谱
-    source_text    TEXT        NOT NULL,          -- 原始政策文本片段
-    status         VARCHAR(20) DEFAULT 'pending', -- pending/processed
+    graph_json     JSONB       NOT NULL,
+    source_text    TEXT        NOT NULL,
+    status         VARCHAR(20) DEFAULT 'pending',
     created_at     TIMESTAMP   DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS sop_active (
     id             SERIAL PRIMARY KEY,
-    sop_name       VARCHAR(200) NOT NULL,         -- SOP 名称
-    policy_name    VARCHAR(200),                  -- 关联政策名称
-    graph_json     JSONB       NOT NULL,          -- 审批通过的 SOP 操作图谱
-    approved       BOOLEAN     DEFAULT FALSE,     -- 人工审核状态
+    sop_name       VARCHAR(200) NOT NULL,
+    policy_name    VARCHAR(200),
+    graph_json     JSONB       NOT NULL,
+    approved       BOOLEAN     DEFAULT FALSE,
     approved_by    VARCHAR(50),
     approved_at    TIMESTAMP   DEFAULT NOW(),
-    created_at     TIMESTAMP   DEFAULT NOW()      -- 记录创建时间
+    created_at     TIMESTAMP   DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS news_analysis (
+    article_id      VARCHAR(200) PRIMARY KEY,
+    source          VARCHAR(50),
+    title           TEXT,
+    pub_time        TIMESTAMP,
+    news_score      NUMERIC(5,4) DEFAULT 0,
+    impact_type     VARCHAR(50),
+    impact_concept  VARCHAR(100),
+    sentiment       VARCHAR(20),
+    reason          TEXT,
+    related_ts_codes    JSONB DEFAULT '[]',
+    new_concept_terms   JSONB DEFAULT '[]',
+    mentioned_companies JSONB DEFAULT '[]',
+    supply_chain_impact JSONB DEFAULT '[]',
+    updated_at      TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS concept_stocks (
+    concept     VARCHAR(100) NOT NULL,
+    ts_code     VARCHAR(12)  NOT NULL,
+    sources     JSONB        DEFAULT '[]',
+    score       NUMERIC(8,4) DEFAULT 0,
+    stock_name  VARCHAR(50)  DEFAULT '',
+    updated_at  TIMESTAMP    DEFAULT NOW(),
+    PRIMARY KEY (concept, ts_code)
+);
+CREATE INDEX IF NOT EXISTS idx_concept_stocks_concept ON concept_stocks(concept);
+CREATE INDEX IF NOT EXISTS idx_concept_stocks_code ON concept_stocks(ts_code);
 """
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────

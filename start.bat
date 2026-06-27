@@ -19,12 +19,13 @@ echo  ^|  [5] 构建静态图谱 (需政策PDF)                        ^|
 echo  ^|  [6] SOP审核平台 (API Server)                        ^|
 echo  ^|  [7] 运行测试套件                                    ^|
 echo  ^|  [8] 查看系统输出                                    ^|
+echo  ^|  [9] 安全关闭所有服务                                 ^|
 echo  ^|                                                     ^|
 echo  ^|  [Q] 退出                                           ^|
 echo  ^|                                                     ^|
 echo  +=====================================================+
 echo.
-set /p choice="  请选择 [1-8/Q]: "
+set /p choice="  请选择 [1-9/Q]: "
 
 if /i "%choice%"=="1" goto START_ALL
 if /i "%choice%"=="2" goto INIT
@@ -34,6 +35,7 @@ if /i "%choice%"=="5" goto STATIC
 if /i "%choice%"=="6" goto API
 if /i "%choice%"=="7" goto TEST
 if /i "%choice%"=="8" goto VIEW
+if /i "%choice%"=="9" goto SHUTDOWN
 if /i "%choice%"=="Q" exit /b
 if /i "%choice%"=="q" exit /b
 echo  [!] 无效选择
@@ -174,6 +176,30 @@ if /i "%tc%"=="b" pytest tests\test_phase1.py tests\test_phase2.py tests\test_ph
 if /i "%tc%"=="c" pytest tests\test_e2e.py -v -s
 if /i "%tc%"=="d" pytest tests\test_full_chain.py -v -s --tb=short
 echo.
+pause
+goto MENU
+
+:SHUTDOWN
+cls
+echo.
+echo  =====================================================
+echo    安全关闭所有服务
+echo  =====================================================
+echo.
+echo  [1/2] 通过 API 停止后台任务...
+curl -s -X POST http://localhost:8088/api/shutdown 2>nul
+echo.
+echo  [2/2] 清理残留进程...
+taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq API-Server*" /F >nul 2>&1
+for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /fo list 2^>nul ^| findstr "PID:"') do (
+    wmic process where "ProcessId=%%a" get CommandLine 2>nul | findstr /i "main.py" >nul && (
+        taskkill /PID %%a /F >nul 2>&1
+        echo    已终止 python 进程 PID=%%a
+    )
+)
+echo.
+echo  所有服务已安全关闭。
 pause
 goto MENU
 

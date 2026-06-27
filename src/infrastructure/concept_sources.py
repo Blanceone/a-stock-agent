@@ -28,15 +28,27 @@ def _em_code_to_ts_code(em_code: str) -> str:
     return f"{code}.SZ"
 
 
-def fetch_akshare_concepts(max_boards: int = 0, sleep_sec: float = 0.5) -> list[dict]:
+# 过滤掉无意义的短线情绪概念（非产业概念）
+_FILTER_PREFIXES = ("昨日", "今日", "近端", "远端", "连续", "次新", "竞价")
+
+
+def _should_filter(name: str) -> bool:
+    """判断是否应过滤掉的概念（短线交易情绪类）"""
+    for prefix in _FILTER_PREFIXES:
+        if name.startswith(prefix):
+            return True
+    return False
+
+
+def fetch_akshare_concepts(max_boards: int = 150, sleep_sec: float = 0.3) -> list[dict]:
     """
     从 akshare 获取东方财富概念板块列表 + 成分股。
 
     参数:
-      max_boards: 最多获取多少个板块（0=全部）
+      max_boards: 最多获取多少个板块（0=全部，默认150取最热门）
       sleep_sec: 成分股请求间隔秒数（防限流）
 
-    返回: [{"concept": "...", "stocks": ["300750.SZ",...], "source": "akshare_em", "board_code": "BK0891"}, ...]
+    返回: [{"concept": "...", "stocks": ["300750.SZ",...], "source": "akshare_em"}, ...]
     """
     try:
         import akshare as ak
@@ -45,18 +57,21 @@ def fetch_akshare_concepts(max_boards: int = 0, sleep_sec: float = 0.5) -> list[
         return []
 
     results: list[dict] = []
+    filtered_count = 0
     try:
-        # 获取概念板块列表
         df_boards = ak.stock_board_concept_name_em()
         if df_boards is None or df_boards.empty:
             logger.warning("[ConceptSources] akshare 东财概念列表为空")
             return []
 
         board_names = df_boards["板块名称"].tolist()
+        # 过滤无意义的短线情绪概念
+        board_names = [n for n in board_names if not _should_filter(n)]
         if max_boards > 0:
             board_names = board_names[:max_boards]
 
-        logger.info("[ConceptSources] akshare 东财概念板块: {} 个", len(board_names))
+        logger.info("[ConceptSources] akshare 东财概念板块: 总 {} 个, 过滤后取 {} 个",
+                     len(df_boards), len(board_names))
 
         for idx, board_name in enumerate(board_names, 1):
             try:
@@ -75,27 +90,26 @@ def fetch_akshare_concepts(max_boards: int = 0, sleep_sec: float = 0.5) -> list[
                         "concept": board_name,
                         "stocks": stocks,
                         "source": "akshare_em",
-                        "board_code": "",
                     })
 
-                if idx % 50 == 0:
-                    logger.info("[ConceptSources] akshare 进度 {}/{}", idx, len(board_names))
+                if idx % 30 == 0:
+                    logger.info("[ConceptSources] akshare 进度 {}/{} (已获取 {} 个板块)",
+                                idx, len(board_names), len(results))
 
             except Exception as e:
-                logger.debug("[ConceptSources] akshare 板块 '{}' 成分股失败: {}", board_name, e)
+                logger.warning("[ConceptSources] akshare 板块 '{}' 成分股失败: {}", board_name, e)
 
-            # 防限流
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
 
-        logger.info("[ConceptSources] akshare 完成: {} 个板块", len(results))
+        logger.info("[ConceptSources] akshare 完成: {} 个板块（过滤 {} 个）", len(results), filtered_count)
     except Exception as e:
         logger.warning("[ConceptSources] akshare 东财概念获取失败: {}", e)
 
     return results
 
 
-def fetch_tushare_concepts(sleep_sec: float = 0.3) -> list[dict]:
+def fetch_tushare_concepts(sleep_sec: float = 0.25) -> list[dict]:
     """
     从 tushare 获取概念板块 + 成分股。
 
@@ -120,7 +134,6 @@ def fetch_tushare_concepts(sleep_sec: float = 0.3) -> list[dict]:
     try:
         pro = ts.pro_api(token)
 
-        # 获取概念列表
         df_concepts = pro.concept()
         if df_concepts is None or df_concepts.empty:
             logger.warning("[ConceptSources] tushare 概念列表为空")
@@ -148,11 +161,12 @@ def fetch_tushare_concepts(sleep_sec: float = 0.3) -> list[dict]:
                         "board_code": concept_id,
                     })
 
-                if (idx + 1) % 50 == 0:
-                    logger.info("[ConceptSources] tushare 进度 {}/{}", idx + 1, len(df_concepts))
+                if (idx + 1) % 30 == 0:
+                    logger.info("[ConceptSources] tushare 进度 {}/{} (已获取 {} 个板块)",
+                                idx + 1, len(df_concepts), len(results))
 
             except Exception as e:
-                logger.debug("[ConceptSources] tushare 概念 '{}' 成分股失败: {}", concept_name, e)
+                logger.warning("[ConceptSources] tushare 概念 '{}' 成分股失败: {}", concept_name, e)
 
             if sleep_sec > 0:
                 time.sleep(sleep_sec)

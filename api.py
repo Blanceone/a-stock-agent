@@ -641,3 +641,36 @@ def list_tasks():
         ]
     }
 
+
+@app.post("/api/shutdown")
+def shutdown_all():
+    """安全关闭所有后台任务进程"""
+    import signal
+    killed = []
+    errors = []
+    for tid, t in _tasks.items():
+        if t["status"] == "running" and t.get("pid"):
+            pid = t["pid"]
+            try:
+                os.kill(pid, signal.SIGTERM)
+                t["status"] = "stopped"
+                killed.append({"task": t["label"], "pid": pid})
+            except Exception as e:
+                errors.append({"task": t["label"], "pid": pid, "error": str(e)})
+    # 同时尝试终止 SSH 隧道进程
+    try:
+        if sys.platform == "win32":
+            os.system('taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1')
+        else:
+            os.system("pkill -f 'ssh -N -L' 2>/dev/null || true")
+        killed.append({"task": "SSH隧道", "pid": "all"})
+    except Exception:
+        pass
+
+    return {
+        "status": "shutdown",
+        "killed": killed,
+        "errors": errors,
+        "message": f"已关闭 {len(killed)} 个进程" + (f"，{len(errors)} 个失败" if errors else ""),
+    }
+

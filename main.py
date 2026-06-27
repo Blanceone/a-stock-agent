@@ -51,6 +51,88 @@ def run_static(pdf_path: str) -> None:
 _shared_concepts: list[dict] = []
 
 
+# ── PostgreSQL 落盘辅助 ─────────────────────────────────────────────────────
+def _pg_persist_news_analysis(news_result: dict, item) -> None:
+    """将新闻分析结果写入 PG news_analysis 表（UPSERT）"""
+    try:
+        from src.infrastructure.database import get_pg_conn, release_pg_conn, pg_pool
+        if pg_pool is None:
+            return
+        conn = get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO news_analysis (article_id, source, title, pub_time,
+                        news_score, impact_type, impact_concept, sentiment, reason,
+                        related_ts_codes, new_concept_terms,
+                        mentioned_companies, supply_chain_impact, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (article_id) DO UPDATE SET
+                        news_score=EXCLUDED.news_score, impact_type=EXCLUDED.impact_type,
+                        impact_concept=EXCLUDED.impact_concept, sentiment=EXCLUDED.sentiment,
+                        reason=EXCLUDED.reason, related_ts_codes=EXCLUDED.related_ts_codes,
+                        new_concept_terms=EXCLUDED.new_concept_terms,
+                        mentioned_companies=EXCLUDED.mentioned_companies,
+                        supply_chain_impact=EXCLUDED.supply_chain_impact,
+                        updated_at=NOW()
+                """, (
+                    item.article_id,
+                    getattr(item, 'source', ''),
+                    news_result.get("news_title", ""),
+                    getattr(item, 'pub_time', None),
+                    news_result.get("news_score", 0),
+                    news_result.get("impact_type", ""),
+                    news_result.get("impact_concept", ""),
+                    news_result.get("sentiment", "neutral"),
+                    news_result.get("reason", ""),
+                    json.dumps(news_result.get("related_ts_codes", []), ensure_ascii=False),
+                    json.dumps(news_result.get("new_concept_terms", []), ensure_ascii=False),
+                    json.dumps(news_result.get("mentioned_companies", []), ensure_ascii=False),
+                    json.dumps(news_result.get("supply_chain_impact", []), ensure_ascii=False),
+                ))
+            conn.commit()
+        finally:
+            release_pg_conn(conn)
+    except Exception as e:
+        logger.debug("[Main] PG news_analysis 落盘失败: {}", e)
+
+
+def _pg_persist_concept_stocks(concepts_data: list[dict]) -> None:
+    """批量将概念-股票映射写入 PG concept_stocks 表（UPSERT）"""
+    try:
+        from src.infrastructure.database import get_pg_conn, release_pg_conn, pg_pool
+        if pg_pool is None or not concepts_data:
+            return
+        conn = get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                for board in concepts_data:
+                    concept = board.get("concept", "")
+                    source = board.get("source", "unknown")
+                    for ts_code in board.get("stocks", []):
+                        cur.execute("""
+                            INSERT INTO concept_stocks (concept, ts_code, sources, stock_name, updated_at)
+                            VALUES (%s, %s, %s, '', NOW())
+                            ON CONFLICT (concept, ts_code) DO UPDATE SET
+                                sources = (
+                                    SELECT jsonb_agg(DISTINCT v)
+                                    FROM (
+                                        SELECT jsonb_array_elements(concept_stocks.sources) AS v
+                                        UNION
+                                        SELECT %s::jsonb AS v
+                                    ) sub
+                                ),
+                                updated_at = NOW()
+                        """, (concept, ts_code,
+                              json.dumps([source], ensure_ascii=False),
+                              json.dumps(source, ensure_ascii=False)))
+            conn.commit()
+        finally:
+            release_pg_conn(conn)
+    except Exception as e:
+        logger.debug("[Main] PG concept_stocks 落盘失败: {}", e)
+
+
 def _persist_concept_stocks(redis_client, concept_terms: list[str],
                             ts_codes: list[str], source: str = "llm",
                             stock_names: dict[str, str] | None = None):
@@ -102,6 +184,36 @@ def _persist_concept_stocks(redis_client, concept_terms: list[str],
             redis_client.expire("dynamic:concepts", 7 * 86400)
         except Exception as e:
             logger.debug("[Main] 概念持久化失败 {}: {}", term, e)
+
+    # PG 落盘（LLM 发现的概念-股票映射）
+    try:
+        from src.infrastructure.database import get_pg_conn, release_pg_conn, pg_pool
+        if pg_pool is not None:
+            conn = get_pg_conn()
+            try:
+                with conn.cursor() as cur:
+                    for term in concept_terms:
+                        if not term:
+                            continue
+                        for ts_code in (ts_codes or []):
+                            cur.execute("""
+                                INSERT INTO concept_stocks (concept, ts_code, sources, stock_name, updated_at)
+                                VALUES (%s, %s, '["llm"]', '', NOW())
+                                ON CONFLICT (concept, ts_code) DO UPDATE SET
+                                    sources = (
+                                        SELECT jsonb_agg(DISTINCT v)
+                                        FROM (
+                                            SELECT jsonb_array_elements(concept_stocks.sources) AS v
+                                            UNION SELECT '"llm"'::jsonb AS v
+                                        ) sub
+                                    ),
+                                    updated_at = NOW()
+                            """, (term, ts_code))
+                conn.commit()
+            finally:
+                release_pg_conn(conn)
+    except Exception as e:
+        logger.debug("[Main] 概念 PG 落盘失败: {}", e)
 
 
 def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict]):
@@ -168,22 +280,43 @@ async def concept_sync_job():
         return
 
     logger.info("[Main] ===== 概念板块同步开始 =====")
+    akshare_data = []
+    tushare_data = []
 
     # akshare 东财概念
     try:
         akshare_data = await asyncio.to_thread(fetch_akshare_concepts)
-        sync_concepts_to_redis(db.redis_client, "akshare_em", akshare_data)
+        if akshare_data:
+            sync_concepts_to_redis(db.redis_client, "akshare_em", akshare_data)
+        else:
+            logger.warning("[Main] akshare 概念数据为空")
     except Exception as e:
         logger.warning("[Main] akshare 概念同步失败: {}", e)
 
     # tushare 概念
     try:
         tushare_data = await asyncio.to_thread(fetch_tushare_concepts)
-        sync_concepts_to_redis(db.redis_client, "tushare", tushare_data)
+        if tushare_data:
+            sync_concepts_to_redis(db.redis_client, "tushare", tushare_data)
+        else:
+            logger.warning("[Main] tushare 概念数据为空")
     except Exception as e:
         logger.warning("[Main] tushare 概念同步失败: {}", e)
 
-    logger.info("[Main] ===== 概念板块同步完成 =====")
+    # PG 落盘（概念-股票映射，在线程池中批量写入）
+    all_concepts = akshare_data + tushare_data
+    if all_concepts:
+        await asyncio.to_thread(_pg_persist_concept_stocks, all_concepts)
+
+    # 统计 Redis 中概念总数
+    if db.redis_client:
+        try:
+            total = db.redis_client.hlen("dynamic:concepts")
+            logger.info("[Main] ===== 概念板块同步完成 (Redis 共 {} 个概念) =====", total)
+        except Exception:
+            logger.info("[Main] ===== 概念板块同步完成 =====")
+    else:
+        logger.info("[Main] ===== 概念板块同步完成 =====")
 
 
 async def run_dynamic() -> None:
@@ -291,6 +424,10 @@ async def run_dynamic() -> None:
                 db.redis_client.expire("dynamic:news_analysis", 7 * 86400)
             except Exception as e:
                 logger.debug("[Main] 分析结果持久化失败: {}", e)
+
+            # PG 落盘（新闻分析结果，异步线程池中执行避免阻塞）
+            if news_result:
+                await asyncio.to_thread(_pg_persist_news_analysis, news_result, item)
 
         # 输出预警日志
         for alert in result.get("resonance_alerts", []):

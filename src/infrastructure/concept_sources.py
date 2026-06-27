@@ -173,6 +173,11 @@ def fetch_tushare_concepts(sleep_sec: float = 0.25) -> list[dict]:
 
         logger.info("[ConceptSources] tushare 完成: {} 个板块", len(results))
     except Exception as e:
-        logger.warning("[ConceptSources] tushare 概念获取失败: {}", e)
+        err_msg = str(e)
+        if "接口名" in err_msg or "权限" in err_msg:
+            logger.warning("[ConceptSources] tushare concept 接口不可用（需5000+积分），"
+                           "跳过 tushare 概念数据，仅使用 akshare 东财概念")
+        else:
+            logger.warning("[ConceptSources] tushare 概念获取失败: {}", err_msg)
 
     return results

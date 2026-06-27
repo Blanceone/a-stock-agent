@@ -293,15 +293,13 @@ async def concept_sync_job():
     except Exception as e:
         logger.warning("[Main] akshare 概念同步失败: {}", e)
 
-    # tushare 概念
+    # tushare 概念（需5000+积分，2000积分不可用，静默跳过）
     try:
         tushare_data = await asyncio.to_thread(fetch_tushare_concepts)
         if tushare_data:
             sync_concepts_to_redis(db.redis_client, "tushare", tushare_data)
-        else:
-            logger.warning("[Main] tushare 概念数据为空")
     except Exception as e:
-        logger.warning("[Main] tushare 概念同步失败: {}", e)
+        logger.debug("[Main] tushare 概念同步跳过: {}", e)
 
     # PG 落盘（概念-股票映射，在线程池中批量写入）
     all_concepts = akshare_data + tushare_data

@@ -77,6 +77,10 @@ def _split_chain(concept: str, report_texts: list[str]) -> dict:
         report_texts=combined[:8000],
     )
     result = call_llm_json(prompt, model="pro", max_tokens=4096)
+    # 类型防护：LLM 可能返回 list 而非 dict
+    if not isinstance(result, dict):
+        logger.warning("[chain_splitter] LLM 返回非 dict: {}", type(result).__name__)
+        result = {"layers": [], "concept": concept}
     result["source_urls"] = []  # 占位，实际 URLs 由外层填入
     return result
 

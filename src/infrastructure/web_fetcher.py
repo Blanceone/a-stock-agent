@@ -61,11 +61,13 @@ def fetch_article(url: str) -> str:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            html = page.content()
-            browser.close()
+            try:
+                page = browser.new_page()
+                page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                html = page.content()
+            finally:
+                browser.close()
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()

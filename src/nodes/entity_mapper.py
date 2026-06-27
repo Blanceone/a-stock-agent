@@ -65,7 +65,13 @@ def _llm_score(node_name: str, node_desc: str, candidates: list[dict]) -> list[d
         )
         try:
             batch_scores = call_llm_json(prompt, model="pro", max_tokens=2048)
+            # 类型防护：LLM 可能返回 dict 而非 list
+            if not isinstance(batch_scores, list):
+                logger.warning("[entity_mapper] LLM 返回非数组: {}", type(batch_scores).__name__)
+                continue
             for s in batch_scores:
+                if not isinstance(s, dict):
+                    continue
                 if s.get("keep", s.get("score", 0) >= settings.entity_llm_score_threshold):
                     scored.append(s)
         except Exception as e:

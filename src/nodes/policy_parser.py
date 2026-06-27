@@ -92,8 +92,11 @@ def run(state: dict) -> dict:
     concept_prompt = template.split("---")[1].format(section_texts=combined_text[:8000])
     concepts_raw = call_llm_json(concept_prompt, model="pro")
 
-    # 直接使用 LLM 返回结果（prompt 中已包含空词过滤指令）
-    concepts = [c for c in concepts_raw if c.get("concept")]
+    # 类型防护：LLM 可能返回 dict 而非 list
+    if not isinstance(concepts_raw, list):
+        logger.warning("[policy_parser] LLM 返回非数组: {}", type(concepts_raw).__name__)
+        concepts_raw = []
+    concepts = [c for c in concepts_raw if isinstance(c, dict) and c.get("concept")]
     logger.info("[policy_parser] 提取概念词: {} 个", len(concepts))
     for c in concepts:
         logger.debug("  - {} (置信度: {}, 来源: {})",

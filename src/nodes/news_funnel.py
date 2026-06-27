@@ -56,7 +56,7 @@ def _update_concepts(concepts: list[dict], new_terms: list[str]) -> list[dict]:
             new_concepts.append({
                 "concept": term,
                 "source_section": "news_discovered",
-                "confidence": 0.8,
+                "confidence": 0.5,  # 与 main.py _persist_concept_stocks 保持一致
             })
             existing.add(term)
             logger.info("[news_funnel] 新概念入库: {}", term)

@@ -101,7 +101,7 @@ def fetch_stock_basic() -> pd.DataFrame:
                 df = df.merge(df_mv, on="ts_code", how="left", suffixes=("", "_mv"))
                 # merge 后 circ_mv 列可能变为 circ_mv_mv（如果原列也有值）
                 if "circ_mv_mv" in df.columns:
-                    df["circ_mv"] = df["circ_mv"].fillna(df["circ_mv_mv"])
+                    df["circ_mv"] = df["circ_mv"].where(df["circ_mv"].notna(), df["circ_mv_mv"])
                     df = df.drop(columns=["circ_mv_mv"])
                 break
         else:

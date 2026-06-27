@@ -8,7 +8,6 @@ searxng_search.py — SearXNG 搜索封装。
 """
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass
 
@@ -42,13 +41,6 @@ def _check_rate_limit() -> None:
         raise RateLimitError(
             f"SearXNG 已达 {settings.searxng_rate_limit_per_minute} 次/分钟限制"
         )
-
-
-def _llm_cache_key(prompt_text: str) -> str:
-    """生成 LLM 缓存 Redis Key"""
-    from src.infrastructure.database import REDIS_KEY_LLM_CACHE
-    h = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]
-    return REDIS_KEY_LLM_CACHE.format(prompt_hash=h)
 
 
 def search(query: str, num_results: int = 10) -> list[SearchResult]:

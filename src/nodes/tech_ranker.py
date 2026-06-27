@@ -26,16 +26,20 @@ from src.tools.indicator_calc import calc_all
 
 def _fetch_klines(ts_codes: list[str]) -> dict:
     """批量拉取近60个交易日K线数据"""
+    import time
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
     klines: dict = {}
-    for ts_code in ts_codes:
+    for i, ts_code in enumerate(ts_codes):
         try:
             df = fetch_daily(ts_code, start_date, end_date)
             if not df.empty:
                 klines[ts_code] = df
         except Exception as e:
             logger.warning("[tech_ranker] K线拉取失败 ts_code={} reason={}", ts_code, e)
+        # Tushare 限频保护（2000积分约200次/分钟，0.3s间隔留余量）
+        if i < len(ts_codes) - 1:
+            time.sleep(0.3)
     return klines
 
 

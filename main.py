@@ -418,9 +418,8 @@ async def run_dynamic() -> None:
                     # 概念→新闻反向映射（Sorted Set）+ 概念→股票评分（Hash）
                     import time as _time
                     _ts = _time.time()
-                    _all_concepts = list(set(
-                        (news_result.get("impact_concept") or "") and [news_result.get("impact_concept")] or []
-                    ) + (news_result.get("new_concept_terms", [])))
+                    _impact = [news_result["impact_concept"]] if news_result.get("impact_concept") else []
+                    _all_concepts = list(set(_impact) | set(news_result.get("new_concept_terms", [])))
                     _all_concepts = [c for c in _all_concepts if c]
                     if _all_concepts:
                         _news_score = news_result.get("news_score", 0)

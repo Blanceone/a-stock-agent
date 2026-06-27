@@ -587,6 +587,7 @@ async function renderPool() {
 }
 
 // ── Concepts ──
+let _graphPollTimer = null;
 async function renderConcepts() {
   const c = $('#content');
   c.innerHTML = '<h2 class="page-title">概念图谱</h2><div class="loading">加载中...</div>';
@@ -596,14 +597,42 @@ async function renderConcepts() {
   if (d.redis === false) {
     html += `<div style="background:var(--red);color:#fff;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">⚠ Redis 未连接</div>`;
   }
+
+  // ── 政策概念图谱操作区 ──
+  html += `<div class="panel" style="margin-bottom:20px">
+    <div class="panel-title">政策概念图谱</div>
+    <div style="margin-top:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-blue" onclick="buildConceptGraph()">构建概念图谱</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="manualConceptInput" placeholder="输入概念名称..." style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;width:180px" onkeydown="if(event.key==='Enter')addManualConcept()">
+        <button class="btn btn-green btn-sm" onclick="addManualConcept()">添加</button>
+      </div>
+      <span id="graphBuildStatus" style="color:var(--muted);font-size:13px"></span>
+    </div>
+    <div id="graphProgressBar" style="display:none;margin-top:12px">
+      <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
+        <div id="graphProgressFill" style="background:var(--accent);height:100%;width:0%;transition:width .3s"></div>
+      </div>
+      <div id="graphProgressText" style="color:var(--muted);font-size:12px;margin-top:4px"></div>
+    </div>
+  </div>`;
+
+  // ── 图谱层级视图 ──
+  html += `<div class="panel" id="conceptGraphTree" style="display:none;margin-bottom:20px">
+    <div class="panel-header"><div class="panel-title">图谱层级视图</div>
+    <button class="btn btn-blue btn-sm" onclick="loadGraphTree()">&#8635; 刷新</button></div>
+    <div id="graphTreeContent"></div>
+  </div>`;
+
+  // ── 概念列表 ──
   if (d.hint) {
     html += `<div style="background:var(--yellow);color:#000;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px">${escHtml(d.hint)}</div>`;
   }
-  const sourceLabels = {akshare_em:'东财',tushare:'Tushare',llm:'LLM新闻',llm_classify:'LLM分类',news:'新闻'};
-  html += `<div style="color:var(--muted);font-size:13px;margin-bottom:16px">共 ${d.count} 个概念 | 来源: 东财概念 + Tushare概念 + LLM 自动发现</div>`;
+  const sourceLabels = {akshare_em:'东财',tushare:'Tushare',llm:'LLM新闻',llm_classify:'LLM分类',news:'新闻',concept_graph:'图谱'};
+  html += `<div style="color:var(--muted);font-size:13px;margin-bottom:16px">共 ${d.count} 个概念 | 来源: 东财概念 + LLM 自动发现 + 政策图谱</div>`;
   html += '<button class="btn btn-blue btn-sm" onclick="renderConcepts()" style="margin-bottom:16px">&#8635; 刷新</button>';
   if (!d.items.length) {
-    html += '<div class="panel"><div class="empty">暂无概念数据<br><small>启动动态监控后，系统会自动从东财/Tushare/新闻中发现概念</small></div></div>';
+    html += '<div class="panel"><div class="empty">暂无概念数据<br><small>点击「构建概念图谱」或启动动态监控自动发现概念</small></div></div>';
   } else {
     for (const it of d.items) {
       const lastSeen = it.last_seen ? new Date(it.last_seen).toLocaleString('zh-CN') : '-';
@@ -634,6 +663,122 @@ async function renderConcepts() {
     }
   }
   c.innerHTML = html;
+
+  // 自动加载图谱树（如果有数据）
+  loadGraphTree();
+  // 检查构建进度
+  pollGraphProgress();
+}
+
+// ── 概念图谱操作 ──
+async function buildConceptGraph() {
+  try {
+    const r = await fetch('/api/concept-graph/build', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d = await r.json();
+    if (d.status === 'already_running') { alert(d.message); return; }
+    document.getElementById('graphProgressBar').style.display = 'block';
+    document.getElementById('graphBuildStatus').textContent = '构建中...';
+    if (_graphPollTimer) clearInterval(_graphPollTimer);
+    _graphPollTimer = setInterval(pollGraphProgress, 3000);
+  } catch(e) { alert('触发失败: ' + e.message); }
+}
+
+async function pollGraphProgress() {
+  const d = await api('/api/concept-graph/progress');
+  if (!d || d.status === 'idle') return;
+
+  const bar = document.getElementById('graphProgressBar');
+  const fill = document.getElementById('graphProgressFill');
+  const text = document.getElementById('graphProgressText');
+  const status = document.getElementById('graphBuildStatus');
+  if (!bar || !fill || !text || !status) return;
+
+  bar.style.display = 'block';
+
+  if (d.status === 'running' || d.status === 'fetching_policy' || d.status === 'extracting_layer0') {
+    const estimatedTotal = (d.total_layer0 || 10) * 6;
+    const pct = Math.min(99, Math.round(((d.discovered_count||0) / estimatedTotal) * 100));
+    fill.style.width = pct + '%';
+    fill.style.background = 'var(--accent)';
+    const statusMap = {fetching_policy:'获取政策文本...', extracting_layer0:'提取核心概念...', running:'迭代扩展中...'};
+    text.textContent = `${statusMap[d.status]||'处理中'} | 深度 ${d.current_depth||0} | 已发现 ${d.discovered_count||0} 个概念${d.current_concept ? ' | 当前: '+d.current_concept : ''}`;
+    status.textContent = '构建中...';
+    if (!_graphPollTimer) _graphPollTimer = setInterval(pollGraphProgress, 3000);
+  } else if (d.status === 'completed') {
+    fill.style.width = '100%';
+    fill.style.background = 'var(--green)';
+    text.textContent = `构建完成! 共发现 ${d.discovered_count||0} 个概念`;
+    status.textContent = '已完成';
+    status.style.color = 'var(--green)';
+    if (_graphPollTimer) { clearInterval(_graphPollTimer); _graphPollTimer = null; }
+    loadGraphTree();
+  } else if (d.status === 'failed') {
+    fill.style.width = '100%';
+    fill.style.background = 'var(--red)';
+    text.textContent = '构建失败: ' + (d.errors?.[0] || '未知错误');
+    status.textContent = '失败';
+    status.style.color = 'var(--red)';
+    if (_graphPollTimer) { clearInterval(_graphPollTimer); _graphPollTimer = null; }
+  }
+}
+
+async function loadGraphTree() {
+  const d = await api('/api/concept-graph/tree');
+  const panel = document.getElementById('conceptGraphTree');
+  const content = document.getElementById('graphTreeContent');
+  if (!panel || !content) return;
+  if (!d || !d.nodes || !d.nodes.length) { panel.style.display = 'none'; return; }
+
+  panel.style.display = 'block';
+  let html = `<div style="color:var(--muted);font-size:13px;margin-bottom:12px">共 ${d.total_nodes} 个概念 | 最大深度 ${d.max_depth}</div>`;
+
+  function renderNode(node, indent) {
+    const pad = indent * 24;
+    const colors = ['var(--accent)', 'var(--green)', 'var(--purple)', 'var(--yellow)'];
+    const depthColor = colors[Math.min(indent, 3)];
+    const prefix = indent > 0 ? '<span style="color:var(--border)">└─</span> ' : '';
+    const relStr = node.relation ? ` | ${escHtml(node.relation)}` : '';
+    const relScore = node.relevance ? ` (${(node.relevance*100).toFixed(0)}%)` : '';
+    const anchorStr = node.policy_anchor ? `<span style="color:var(--purple);font-size:11px;margin-left:6px">[${escHtml(node.policy_anchor.substring(0,30))}]</span>` : '';
+
+    html += `<div style="padding:6px 0 6px ${pad}px;border-bottom:1px solid var(--border);font-size:13px">
+      ${prefix}<span style="font-weight:600;color:${depthColor}">${escHtml(node.concept)}</span>
+      <span style="color:var(--muted);font-size:12px;margin-left:8px">L${node.depth} | ${node.stock_count||0}股${relStr}${relScore}</span>
+      ${anchorStr}
+    </div>`;
+    if (node.children) {
+      for (const child of node.children) {
+        renderNode(child, indent + 1);
+      }
+    }
+  }
+
+  for (const root of d.nodes) {
+    renderNode(root, 0);
+  }
+  content.innerHTML = html;
+}
+
+async function addManualConcept() {
+  const input = document.getElementById('manualConceptInput');
+  const name = (input?.value || '').trim();
+  if (!name) { alert('请输入概念名称'); return; }
+  try {
+    const r = await fetch('/api/concept-graph/add-concept', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({concept_name: name})});
+    const d = await r.json();
+    if (d.status === 'found') {
+      alert(d.message);
+      loadGraphTree();
+    } else if (d.status === 'expanding') {
+      alert(d.message);
+      document.getElementById('graphProgressBar').style.display = 'block';
+      document.getElementById('graphBuildStatus').textContent = '扩展中...';
+      setTimeout(() => { loadGraphTree(); renderConcepts(); }, 5000);
+    } else {
+      alert(d.message || '操作完成');
+    }
+    if (input) input.value = '';
+  } catch(e) { alert('操作失败: ' + e.message); }
 }
 
 async function toggleConceptExpand(conceptName, cardId) {

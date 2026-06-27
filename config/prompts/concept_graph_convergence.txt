@@ -1,0 +1,21 @@
+你是一位A股投研分析师。仅输出JSON，不要解释。
+
+当前概念图谱中已有以下概念（按层级排列）：
+{existing_concepts_summary}
+
+现在发现了一个新概念：「{new_concept}」
+它的来源：{source_context}
+
+请判断这个新概念与现有图谱的关联程度：
+1. relevance_score: 0.0-1.0（与图谱整体的关联度）
+2. best_parent: 最适合作为其父概念的已有概念名称（若关联度 < 0.3 则为空字符串）
+3. should_expand: 是否值得从该概念继续向下扩展（true/false）
+4. reason: 判断理由（不超过30字）
+
+判断标准：
+- relevance >= 0.7: 强关联，必须纳入图谱
+- relevance 0.4-0.7: 中等关联，可纳入但不必扩展
+- relevance < 0.4: 弱关联，不纳入
+
+输出 JSON：
+{{"relevance_score": 0.75, "best_parent": "固态电池", "should_expand": true, "reason": "硫化物电解质是固态电池核心上游材料"}}

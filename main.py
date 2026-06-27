@@ -6,6 +6,7 @@ main.py — A股宏观锚定投研智能体 系统入口
   python main.py --mode dynamic                          # 动态监控（定时任务）
   python main.py --mode init                             # 初始化基础设施（建表、全A股入库）
   python main.py --mode semantic                         # 语义知识库初始化（主营业务向量化入库）
+  python main.py --mode concept_graph                    # 政策概念图谱构建
 """
 from __future__ import annotations
 
@@ -460,6 +461,15 @@ async def run_dynamic() -> None:
             if news_result:
                 await asyncio.to_thread(_pg_persist_news_analysis, news_result, item)
 
+                # 概念图谱增量插入（新闻发现的新概念自动挂入图谱）
+                new_terms = news_result.get("new_concept_terms", [])
+                if new_terms and db.redis_client:
+                    try:
+                        from src.nodes.concept_graph_builder import incremental_insert
+                        await asyncio.to_thread(incremental_insert, new_terms, news_result)
+                    except Exception as _cge:
+                        logger.debug("[Main] 概念图谱增量插入失败: {}", _cge)
+
         # 输出预警日志
         for alert in result.get("resonance_alerts", []):
             logger.warning(
@@ -595,13 +605,29 @@ def run_semantic() -> None:
     logger.info("[Main] 语义知识库初始化完成: {}", stats)
 
 
+def run_concept_graph(policy_text: str = "") -> None:
+    """政策概念图谱构建"""
+    from src.infrastructure.database import init_all
+    init_all()
+
+    from src.nodes.concept_graph_builder import build_full
+    logger.info("[Main] 启动政策概念图谱构建")
+
+    stats = build_full(
+        policy_text_path_or_content=policy_text or None,
+        progress_callback=None,
+    )
+    logger.info("[Main] 概念图谱构建完成: {}", stats)
+
+
 def main():
     parser = argparse.ArgumentParser(description="A股宏观锚定投研智能体")
     parser.add_argument(
-        "--mode", required=True, choices=["static", "dynamic", "init", "semantic"],
-        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库, semantic=语义知识库"
+        "--mode", required=True, choices=["static", "dynamic", "init", "semantic", "concept_graph"],
+        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库, semantic=语义知识库, concept_graph=政策概念图谱"
     )
     parser.add_argument("--pdf", type=str, default="", help="政策PDF路径（static模式）")
+    parser.add_argument("--policy-text", type=str, default="", help="政策文本路径或内容（concept_graph模式可选）")
     args = parser.parse_args()
 
     if args.mode == "static":
@@ -614,6 +640,8 @@ def main():
         run_init()
     elif args.mode == "semantic":
         run_semantic()
+    elif args.mode == "concept_graph":
+        run_concept_graph(args.policy_text)
 
 
 if __name__ == "__main__":

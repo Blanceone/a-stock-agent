@@ -577,16 +577,107 @@ def concept_detail(concept_name: str):
         return {"error": str(e), "redis": True}
 
 
+# ── 概念图谱 API ──────────────────────────────────────────────────────────────
+
+@app.post("/api/concept-graph/build")
+def concept_graph_build(body: dict = {}):
+    """触发政策概念图谱全量构建（后台线程）"""
+    from src.nodes.concept_graph_builder import build_full, get_progress
+    import src.infrastructure.database as db
+
+    progress = get_progress()
+    if progress.get("status") == "running":
+        return {"status": "already_running", "message": "概念图谱构建已在运行中"}
+
+    policy_text = body.get("policy_text", "") if body else ""
+
+    def _bg_build():
+        try:
+            if db.pg_pool is None:
+                db.init_all()
+            build_full(policy_text_path_or_content=policy_text or None)
+        except Exception as e:
+            logger.error("[API] 概念图谱构建异常: {}", e)
+
+    t = threading.Thread(target=_bg_build, daemon=True)
+    t.start()
+    return {"status": "started", "message": "概念图谱构建已启动"}
+
+
+@app.get("/api/concept-graph/progress")
+def concept_graph_progress():
+    """查询概念图谱构建进度"""
+    from src.nodes.concept_graph_builder import get_progress
+    return get_progress()
+
+
+@app.post("/api/concept-graph/add-concept")
+def concept_graph_add_concept(body: dict):
+    """手动添加概念并展开"""
+    from src.nodes.concept_graph_builder import expand_from_concept, _match_existing_concept
+    import src.infrastructure.database as db
+
+    concept_name = (body.get("concept_name") or "").strip()
+    if not concept_name:
+        raise HTTPException(400, "concept_name 不能为空")
+
+    if db.pg_pool is None:
+        db.init_all()
+
+    # 先检查是否已有匹配
+    matched = _match_existing_concept(concept_name)
+    if matched:
+        raw = db.redis_client.hget("dynamic:concepts", matched) if db.redis_client else None
+        if raw:
+            data = json.loads(raw)
+            depth = data.get("graph_depth", -1)
+            if depth >= 0:
+                return {
+                    "status": "found",
+                    "existing_match": matched,
+                    "graph_position": {"depth": depth, "parents": data.get("parent_concepts", [])},
+                    "message": f"已找到相似概念「{matched}」，位于图谱第{depth}层",
+                }
+
+    # 后台展开
+    def _bg_expand():
+        try:
+            expand_from_concept(concept_name)
+        except Exception as e:
+            logger.error("[API] 概念展开异常: {}", e)
+
+    t = threading.Thread(target=_bg_expand, daemon=True)
+    t.start()
+    return {
+        "status": "expanding",
+        "existing_match": matched,
+        "message": f"概念「{concept_name}」已添加并开始扩展",
+    }
+
+
+@app.get("/api/concept-graph/tree")
+def concept_graph_tree(max_depth: int = Query(None, ge=0, le=5)):
+    """获取概念图谱层级树结构"""
+    from src.nodes.concept_graph_builder import get_graph_tree
+    import src.infrastructure.database as db
+
+    if db.pg_pool is None:
+        db.init_all()
+
+    return get_graph_tree(max_depth=max_depth)
+
+
 # ── 后台任务管理 ────────────────────────────────────────────────────────────
 
 _tasks_lock = threading.Lock()
 _tasks: dict[str, dict] = {}  # task_id -> {name, status, started_at, log, proc}
 
 TASKS_CONFIG = {
-    "init":     {"label": "初始化数据",   "cmd": [sys.executable, "main.py", "--mode", "init"]},
-    "semantic": {"label": "语义初始化",   "cmd": [sys.executable, "main.py", "--mode", "semantic"]},
-    "static":   {"label": "静态图谱构建", "cmd": [sys.executable, "main.py", "--mode", "static", "--pdf", "resources/policy.pdf"]},
-    "dynamic":  {"label": "动态监控",     "cmd": [sys.executable, "main.py", "--mode", "dynamic"]},
+    "init":           {"label": "初始化数据",     "cmd": [sys.executable, "main.py", "--mode", "init"]},
+    "semantic":       {"label": "语义初始化",     "cmd": [sys.executable, "main.py", "--mode", "semantic"]},
+    "static":         {"label": "静态图谱构建",   "cmd": [sys.executable, "main.py", "--mode", "static", "--pdf", "resources/policy.pdf"]},
+    "dynamic":        {"label": "动态监控",       "cmd": [sys.executable, "main.py", "--mode", "dynamic"]},
+    "concept_graph":  {"label": "概念图谱构建",   "cmd": [sys.executable, "main.py", "--mode", "concept_graph"]},
 }
 
 

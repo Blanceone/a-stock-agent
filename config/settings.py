@@ -77,5 +77,15 @@ class Settings(BaseSettings):
     # ── SearXNG 限流 ─────────────────────────────────────────
     searxng_rate_limit_per_minute: int = 10
 
+    # ── 概念图谱 ─────────────────────────────────────────────
+    concept_graph_max_depth: int = 3                    # BFS 最大深度
+    concept_graph_max_children: int = 8                 # 每个节点最大子概念数
+    concept_graph_convergence_threshold: float = 0.4    # 收敛阈值（relevance < 此值停止）
+    concept_graph_max_layer0: int = 20                  # Layer0 最大概念数
+    concept_graph_policy_search_queries: str = (
+        "十五五规划纲要全文 site:gov.cn,"
+        "第十五个五年规划 重点产业方向"
+    )
+
 
 settings = Settings()

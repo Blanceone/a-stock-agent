@@ -21,6 +21,13 @@ REDIS_KEY_RATE_LIMIT   = "rate:searxng:{minute_bucket}"
 REDIS_KEY_NEXT_WEIGHTS = "weights:stock:{ts_code}"
 REDIS_KEY_NEWS_FEED    = "dynamic:news_feed"
 
+# ── 概念图谱 Redis Keys ──────────────────────────────────────────────────────
+REDIS_KEY_GRAPH_EDGES       = "concept_graph:edges"          # Hash: child→JSON{parents,relevance}
+REDIS_KEY_GRAPH_ROOTS       = "concept_graph:roots"          # Set: Layer0 概念名
+REDIS_KEY_GRAPH_LAYER       = "concept_graph:layer:{depth}"  # Set: 每层概念名
+REDIS_KEY_GRAPH_PROGRESS    = "concept_graph:build_progress" # String: JSON 构建进度
+REDIS_KEY_GRAPH_BUILD_LOCK  = "concept_graph:build_lock"     # String: 并发锁
+
 # ── PostgreSQL 建表 DDL ───────────────────────────────────────────────────────
 _DDL = """
 CREATE TABLE IF NOT EXISTS stock_basic (

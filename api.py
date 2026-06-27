@@ -16,6 +16,7 @@ api.py — SOP 审核 Web API（FastAPI）
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -271,6 +272,11 @@ def list_stocks(
             params.extend([f"%{search}%", f"%{search}%"])
         order_dir = "DESC" if order == "desc" else "ASC"
         sort_col = sort if sort in ("circ_mv", "name", "ts_code", "industry") else "circ_mv"
+        # circ_mv 可能有 NaN，排序时视为 NULL 放最后
+        if sort_col == "circ_mv":
+            order_expr = f"CASE WHEN circ_mv = 'NaN'::numeric THEN NULL ELSE circ_mv END {order_dir} NULLS LAST"
+        else:
+            order_expr = f"{sort_col} {order_dir} NULLS LAST"
         with conn.cursor() as cur:
             cur.execute(f"SELECT count(*) FROM stock_basic {where_clause}", params)
             total = cur.fetchone()[0]
@@ -278,7 +284,7 @@ def list_stocks(
             cur.execute(
                 f"SELECT ts_code, name, industry, circ_mv, is_st, list_status, updated_at "
                 f"FROM stock_basic {where_clause} "
-                f"ORDER BY {sort_col} {order_dir} NULLS LAST LIMIT %s OFFSET %s",
+                f"ORDER BY {order_expr} LIMIT %s OFFSET %s",
                 params + [size, offset],
             )
             rows = cur.fetchall()
@@ -290,7 +296,7 @@ def list_stocks(
             "items": [
                 {
                     "ts_code": r[0], "name": r[1], "industry": r[2],
-                    "circ_mv": float(r[3]) if r[3] else 0,
+                    "circ_mv": float(r[3]) if r[3] is not None and math.isfinite(float(r[3])) else 0,
                     "is_st": r[4], "list_status": r[5],
                     "updated_at": r[6].isoformat() if r[6] else None,
                 }

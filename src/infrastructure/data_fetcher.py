@@ -63,18 +63,52 @@ def _handle_tushare_error(e: Exception, api_name: str, ts_code: str) -> None:
 def fetch_stock_basic() -> pd.DataFrame:
     """
     获取全A股基础信息（纯 Tushare，无降级，数据唯一权威源）。
+    circ_mv 从 daily_basic 单独获取并合并（stock_basic API 不含 circ_mv 字段）。
     返回列：ts_code, name, industry, circ_mv, list_status
     """
+    from datetime import datetime, timedelta
+
     pro = _tushare_pro()
     logger.info("[DataFetcher] 拉取全A股基础信息 (tushare.stock_basic)")
+
+    # L1: stock_basic（不含 circ_mv）
     try:
         df = pro.stock_basic(
             exchange="",
             list_status="L",
-            fields="ts_code,name,industry,circ_mv,list_status",
+            fields="ts_code,name,industry,list_status",
         )
     except Exception as e:
         _handle_tushare_error(e, "stock_basic", "ALL")
+
+    # 确保 circ_mv 列存在（默认 None）
+    df["circ_mv"] = None
+
+    # L2: 从 daily_basic 获取最新交易日的 circ_mv 并合并
+    try:
+        # 尝试最近 5 个自然日，找到有数据的交易日
+        for days_ago in range(5):
+            trade_date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y%m%d")
+            df_mv = pro.daily_basic(
+                trade_date=trade_date,
+                fields="ts_code,circ_mv",
+            )
+            if df_mv is not None and not df_mv.empty:
+                logger.info(
+                    "[DataFetcher] daily_basic circ_mv 获取成功: "
+                    "trade_date={} 共 {} 条", trade_date, len(df_mv),
+                )
+                df = df.merge(df_mv, on="ts_code", how="left", suffixes=("", "_mv"))
+                # merge 后 circ_mv 列可能变为 circ_mv_mv（如果原列也有值）
+                if "circ_mv_mv" in df.columns:
+                    df["circ_mv"] = df["circ_mv"].fillna(df["circ_mv_mv"])
+                    df = df.drop(columns=["circ_mv_mv"])
+                break
+        else:
+            logger.warning("[DataFetcher] daily_basic 近5天均无数据，circ_mv 为空")
+    except Exception as e:
+        logger.warning("[DataFetcher] daily_basic circ_mv 获取失败: {}，circ_mv 为空", e)
+
     logger.info("[DataFetcher] 全A股基础信息: {} 条", len(df))
     return df
 
@@ -162,6 +196,11 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         except Exception as e:
             # 非瞬态错误：立即抛出，不浪费时间重试
             raise
+
+    # 3次重试均失败（瞬态错误）
+    raise DataFetchError(
+        f"[moneyflow] {ts_code} 重试3次仍失败: {last_err}"
+    ) if last_err else DataFetchError(f"[moneyflow] {ts_code} 未知错误")
 
 
 def fetch_top_list(trade_date: str) -> pd.DataFrame:

@@ -218,6 +218,14 @@ class _ChromaDBCompat:
         import requests
         self._base = base_url
         self._session = requests.Session()
+        self._collections: list = []  # 持有子 Collection 引用以便清理
+
+    def close(self) -> None:
+        """关闭底层 requests.Session，释放连接池资源"""
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
     def heartbeat(self):
         resp = self._session.get(f"{self._base}/api/v1/heartbeat", timeout=5)
@@ -230,7 +238,9 @@ class _ChromaDBCompat:
         if resp.ok:
             data = resp.json()
             coll_id = data.get("id", name)
-            return _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
+            coll = _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
+            self._collections.append(coll)
+            return coll
         # 不存在则创建
         resp = self._session.post(
             f"{self._base}/api/v1/collections",
@@ -240,7 +250,9 @@ class _ChromaDBCompat:
         resp.raise_for_status()
         data = resp.json()
         coll_id = data.get("id", name) if isinstance(data, dict) else name
-        return _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
+        coll = _CollectionCompat(self._base, name, self._session, embedding_function, coll_id)
+        self._collections.append(coll)
+        return coll
 
 
 class _CollectionCompat:
@@ -383,3 +395,37 @@ def init_all() -> None:
         redis_client = None
 
     logger.info("[DB] 全部基础设施初始化完成")
+
+
+def close_all() -> None:
+    """关闭所有连接，释放资源。在进程退出时调用。"""
+    global pg_pool, chroma_client, chroma_collection, redis_client
+
+    # 关闭 ChromaDB 兼容客户端的 requests.Session
+    if chroma_client is not None and hasattr(chroma_client, "close"):
+        try:
+            chroma_client.close()
+            logger.info("[DB] ChromaDB 兼容客户端已关闭")
+        except Exception as e:
+            logger.warning("[DB] ChromaDB 关闭失败: {}", e)
+
+    # 关闭 PostgreSQL 连接池
+    if pg_pool is not None:
+        try:
+            pg_pool.closeall()
+            logger.info("[DB] PostgreSQL 连接池已关闭")
+        except Exception as e:
+            logger.warning("[DB] PostgreSQL 连接池关闭失败: {}", e)
+
+    # 关闭 Redis 连接
+    if redis_client is not None:
+        try:
+            redis_client.close()
+            logger.info("[DB] Redis 连接已关闭")
+        except Exception as e:
+            logger.warning("[DB] Redis 关闭失败: {}", e)
+
+    pg_pool = None
+    chroma_client = None
+    chroma_collection = None
+    redis_client = None

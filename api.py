@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,9 +38,19 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
-from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, ensure_redis, init_all
+from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, ensure_redis, init_all, close_all
 
-app = FastAPI(title="A股投研智能体 SOP 审核平台", version="1.0.0")
+
+# ── Lifespan: 替代废弃的 on_event ────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动时初始化数据库连接，关闭时释放资源"""
+    init_all()
+    yield
+    close_all()
+
+
+app = FastAPI(title="A股投研智能体 SOP 审核平台", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,12 +58,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def startup():
-    """启动时初始化数据库连接"""
-    init_all()
 
 
 # ── SOP 审核接口 ──────────────────────────────────────────────────────────────
@@ -568,7 +573,8 @@ def concept_detail(concept_name: str):
 
 # ── 后台任务管理 ────────────────────────────────────────────────────────────
 
-_tasks: dict[str, dict] = {}  # task_id -> {name, status, started_at, log}
+_tasks_lock = threading.Lock()
+_tasks: dict[str, dict] = {}  # task_id -> {name, status, started_at, log, proc}
 
 TASKS_CONFIG = {
     "init":     {"label": "初始化数据",   "cmd": [sys.executable, "main.py", "--mode", "init"]},
@@ -580,8 +586,9 @@ TASKS_CONFIG = {
 
 def _run_task(task_id: str, task_name: str, cmd: list[str]):
     """在后台线程中运行子进程"""
-    _tasks[task_id]["status"] = "running"
-    _tasks[task_id]["pid"] = None
+    with _tasks_lock:
+        _tasks[task_id]["status"] = "running"
+        _tasks[task_id]["pid"] = None
     try:
         # Windows 下子进程默认用系统编码(cp936)，强制 UTF-8 避免乱码
         env = os.environ.copy()
@@ -591,19 +598,24 @@ def _run_task(task_id: str, task_name: str, cmd: list[str]):
             cwd=str(PROJECT_ROOT), text=True, encoding="utf-8", errors="replace",
             env=env,
         )
-        _tasks[task_id]["pid"] = proc.pid
+        with _tasks_lock:
+            _tasks[task_id]["pid"] = proc.pid
+            _tasks[task_id]["proc"] = proc
         lines: list[str] = []
         for line in proc.stdout:
             lines.append(line.rstrip())
             if len(lines) > 500:
                 lines.pop(0)
-            _tasks[task_id]["log"] = "\n".join(lines[-100:])
+            with _tasks_lock:
+                _tasks[task_id]["log"] = "\n".join(lines[-100:])
         proc.wait()
-        _tasks[task_id]["status"] = "done" if proc.returncode == 0 else "failed"
-        _tasks[task_id]["returncode"] = proc.returncode
+        with _tasks_lock:
+            _tasks[task_id]["status"] = "done" if proc.returncode == 0 else "failed"
+            _tasks[task_id]["returncode"] = proc.returncode
     except Exception as e:
-        _tasks[task_id]["status"] = "failed"
-        _tasks[task_id]["log"] = str(e)
+        with _tasks_lock:
+            _tasks[task_id]["status"] = "failed"
+            _tasks[task_id]["log"] = str(e)
 
 
 @app.post("/api/run/{task_name}")
@@ -613,14 +625,16 @@ def run_task(task_name: str):
     if not cfg:
         raise HTTPException(400, f"未知任务: {task_name}，可选: {list(TASKS_CONFIG.keys())}")
     # 检查是否已有同类型任务在运行
-    for tid, t in _tasks.items():
-        if t["name"] == task_name and t["status"] == "running":
-            return {"task_id": tid, "status": "already_running", "message": f"{cfg['label']} 正在运行中"}
+    with _tasks_lock:
+        for tid, t in _tasks.items():
+            if t["name"] == task_name and t["status"] == "running":
+                return {"task_id": tid, "status": "already_running", "message": f"{cfg['label']} 正在运行中"}
     task_id = uuid.uuid4().hex[:8]
-    _tasks[task_id] = {
-        "name": task_name, "label": cfg["label"], "status": "pending",
-        "started_at": datetime.now().isoformat(), "log": "", "pid": None,
-    }
+    with _tasks_lock:
+        _tasks[task_id] = {
+            "name": task_name, "label": cfg["label"], "status": "pending",
+            "started_at": datetime.now().isoformat(), "log": "", "pid": None, "proc": None,
+        }
     thread = threading.Thread(target=_run_task, args=(task_id, task_name, cfg["cmd"]), daemon=True)
     thread.start()
     logger.info("[Task] 启动 {} (id={})", task_name, task_id)
@@ -630,8 +644,8 @@ def run_task(task_name: str):
 @app.get("/api/tasks")
 def list_tasks():
     """查看任务状态"""
-    return {
-        "tasks": [
+    with _tasks_lock:
+        tasks_snapshot = [
             {
                 "id": tid, "name": t["name"], "label": t["label"],
                 "status": t["status"], "started_at": t["started_at"],
@@ -639,24 +653,27 @@ def list_tasks():
             }
             for tid, t in sorted(_tasks.items(), key=lambda x: x[1].get("started_at", ""), reverse=True)
         ]
-    }
+    return {"tasks": tasks_snapshot}
 
 
 @app.post("/api/shutdown")
 def shutdown_all():
     """安全关闭所有后台任务进程"""
-    import signal
     killed = []
     errors = []
-    for tid, t in _tasks.items():
-        if t["status"] == "running" and t.get("pid"):
-            pid = t["pid"]
+    with _tasks_lock:
+        items = list(_tasks.items())
+    for tid, t in items:
+        if t["status"] == "running" and t.get("proc"):
+            proc = t["proc"]
+            label = t.get("label", "")
             try:
-                os.kill(pid, signal.SIGTERM)
+                # 使用 Popen.terminate() 而非 os.kill，Windows/Linux 均兼容
+                proc.terminate()
                 t["status"] = "stopped"
-                killed.append({"task": t["label"], "pid": pid})
+                killed.append({"task": label, "pid": proc.pid})
             except Exception as e:
-                errors.append({"task": t["label"], "pid": pid, "error": str(e)})
+                errors.append({"task": label, "pid": getattr(proc, "pid", None), "error": str(e)})
     # 同时尝试终止 SSH 隧道进程
     try:
         if sys.platform == "win32":

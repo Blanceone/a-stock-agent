@@ -477,7 +477,10 @@ async def run_dynamic() -> None:
         news_queue, sources, db.redis_client,
         on_process=process_single_news,
     )
-    asyncio.create_task(aggregator.start())
+    _pending_tasks: set[asyncio.Task] = set()
+    _aggr_task = asyncio.create_task(aggregator.start())
+    _pending_tasks.add(_aggr_task)
+    _aggr_task.add_done_callback(_pending_tasks.discard)
 
     # 盘后龙虎榜：工作日 15:30
     async def top_list_update_job():
@@ -517,7 +520,9 @@ async def run_dynamic() -> None:
     scheduler.start()
 
     # 启动时立即执行一次概念同步（后台异步，不阻塞新闻流）
-    asyncio.create_task(concept_sync_job())
+    _sync_task = asyncio.create_task(concept_sync_job())
+    _pending_tasks.add(_sync_task)
+    _sync_task.add_done_callback(_pending_tasks.discard)
 
     logger.info("[Main] 动态监控已启动，按 Ctrl+C 停止")
     try:
@@ -527,12 +532,21 @@ async def run_dynamic() -> None:
         pass
     finally:
         scheduler.shutdown()
+        # 等待 pending tasks 完成（最长 5 秒）
+        for t in list(_pending_tasks):
+            try:
+                await asyncio.wait_for(t, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                t.cancel()
         await aggregator.stop()
         for src in sources:
             try:
                 await src.close()
             except Exception:
                 pass
+        # 关闭所有数据库连接
+        import src.infrastructure.database as _db
+        _db.close_all()
         logger.info("[Main] 动态监控已安全关闭")
 
 

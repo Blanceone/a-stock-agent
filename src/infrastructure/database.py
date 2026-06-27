@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_concept_stocks_code ON concept_stocks(ts_code);
 """
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────
-pg_pool: Optional[psycopg2.pool.SimpleConnectionPool] = None
+pg_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 chroma_client: Optional[chromadb.HttpClient] = None
 chroma_collection: Optional[chromadb.Collection] = None
 redis_client: Optional[redis.Redis] = None
@@ -121,9 +121,9 @@ def release_pg_conn(conn: psycopg2.extensions.connection) -> None:
         pg_pool.putconn(conn)
 
 
-def _init_postgres() -> psycopg2.pool.SimpleConnectionPool:
+def _init_postgres() -> psycopg2.pool.ThreadedConnectionPool:
     logger.info("[DB] 初始化 PostgreSQL 连接池: {}", settings.pg_dsn[:40] + "...")
-    pool = psycopg2.pool.SimpleConnectionPool(
+    pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=1, maxconn=10, dsn=settings.pg_dsn
     )
     # 执行建表

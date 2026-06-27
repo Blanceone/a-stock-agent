@@ -74,6 +74,7 @@ class NewsAggregator:
         self._running = False
         self._on_process = on_process  # async callback(item) for immediate processing
         self._semaphore = asyncio.Semaphore(5)  # max 5 concurrent processing tasks
+        self._bg_tasks: set[asyncio.Task] = set()  # 持有 task 引用防止 GC 回收
 
     async def start(self) -> None:
         """启动所有源的并行轮询任务"""
@@ -125,7 +126,9 @@ class NewsAggregator:
                     new_count += 1
                     # 立即触发并行处理（不等待定时任务）
                     if self._on_process:
-                        asyncio.create_task(self._run_process(item))
+                        task = asyncio.create_task(self._run_process(item))
+                        self._bg_tasks.add(task)
+                        task.add_done_callback(self._bg_tasks.discard)
                 if new_count > 0:
                     logger.debug(
                         "[Aggregator] {} 新增 {} 条（总拉取 {} 条）",

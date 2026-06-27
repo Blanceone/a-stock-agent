@@ -177,7 +177,7 @@ def _persist_concept_stocks(redis_client, concept_terms: list[str],
                     "stocks": stocks_list,
                     "stocks_detail": stocks_detail,
                     "sources": list(concept_sources_set),
-                    "confidence": 0.85,
+                    "confidence": 0.5,  # LLM 发现的概念默认置信度
                     "last_seen": now,
                 }, ensure_ascii=False),
             )
@@ -255,7 +255,7 @@ def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict])
                 "stocks": stocks_list,
                 "stocks_detail": stocks_detail,
                 "sources": list(concept_sources_set),
-                "confidence": 0.9,
+                "confidence": 0.9,  # 外部数据源（akshare/tushare）高可信度
                 "last_seen": now,
             }
             # 保存 LLM 评估的分数和分类（如有）
@@ -524,7 +524,16 @@ async def run_dynamic() -> None:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
         scheduler.shutdown()
+        await aggregator.stop()
+        for src in sources:
+            try:
+                await src.close()
+            except Exception:
+                pass
+        logger.info("[Main] 动态监控已安全关闭")
 
 
 def run_init() -> None:

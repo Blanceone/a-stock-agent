@@ -48,18 +48,19 @@ def _deep_read(title: str, summary: str, concepts: list[dict]) -> dict:
 
 
 def _update_concepts(concepts: list[dict], new_terms: list[str]) -> list[dict]:
-    """将新发现的概念词合并入词库（去重）"""
+    """将新发现的概念词合并入词库（去重），返回新列表避免原地修改"""
     existing = {c.get("concept") for c in concepts}
+    new_concepts = list(concepts)  # 浅拷贝，避免原地修改共享列表
     for term in new_terms:
         if term and term not in existing:
-            concepts.append({
+            new_concepts.append({
                 "concept": term,
                 "source_section": "news_discovered",
                 "confidence": 0.8,
             })
             existing.add(term)
             logger.info("[news_funnel] 新概念入库: {}", term)
-    return concepts
+    return new_concepts
 
 
 def run(state: dict) -> dict:

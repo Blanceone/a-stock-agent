@@ -141,11 +141,11 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         f"&fields=f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
     )
     # 重试 3 次（东财 push2 频繁 RemoteDisconnected，需更长退避）
-    last_err = None
+    last_err: Exception | None = None
     for attempt in range(3):
         try:
             resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
-            data = resp.get("data", {})
+            data = resp.get("data") or {}
             net_inflow = data.get("f62", 0) or 0
             net_inflow_pct = (data.get("f184", 0) or 0) / 100
             return {
@@ -154,11 +154,14 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
                 "net_inflow_pct": net_inflow_pct,
                 "timestamp": datetime.now().isoformat(),
             }
-        except Exception as e:
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # 瞬态错误：重试
             last_err = e
             if attempt < 2:
                 time.sleep(1.0 * (attempt + 1))  # 退避: 1s, 2s
-    raise last_err
+        except Exception as e:
+            # 非瞬态错误：立即抛出，不浪费时间重试
+            raise
 
 
 def fetch_top_list(trade_date: str) -> pd.DataFrame:

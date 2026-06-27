@@ -106,7 +106,7 @@ def _llm_judge(news_title: str, news_score: float, stock_data: list[dict]) -> li
 def _fallback_judge(news_score: float, stock_data: list[dict]) -> list[dict]:
     """降级：旧版三阈值 AND 逻辑"""
     threshold_news = settings.resonance_news_score_threshold
-    threshold_capital = settings.resonance_capital_inflow_pct * 100
+    threshold_capital = settings.resonance_capital_inflow_pct  # 已是小数形式(0.02)
     threshold_vr = settings.resonance_volume_ratio
 
     alerts = []
@@ -119,7 +119,7 @@ def _fallback_judge(news_score: float, stock_data: list[dict]) -> list[dict]:
                 "ts_code": sd["ts_code"],
                 "alert": True,
                 "confidence": 0.7,
-                "reason": f"三阈值AND降级: 消息{news_score:.2f} 资金{sd['capital_inflow_pct']:.1f}% 量比{sd['volume_ratio']:.1f}",
+                "reason": f"三阈值AND降级: 消息{news_score:.2f} 资金{sd['capital_inflow_pct']:.1%} 量比{sd['volume_ratio']:.1f}",
             })
     return alerts
 

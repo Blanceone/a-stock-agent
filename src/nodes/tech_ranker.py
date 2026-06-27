@@ -90,7 +90,7 @@ def _fallback_rank(klines: dict, circ_mv_map: dict, name_map: dict) -> dict:
             }
             if score >= 0.7 and indicators["is_ma_bullish"]:
                 tier1.append(item)
-            elif 0.5 <= score < 0.7:
+            elif score >= 0.5:
                 tier2.append(item)
         except Exception as e:
             logger.warning("[tech_ranker] 降级计算失败 ts_code={} reason={}", ts_code, e)

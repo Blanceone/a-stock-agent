@@ -1,20 +1,30 @@
 """
-concept_sources.py — 多源概念板块数据采集
+concept_sources.py — 多源概念板块数据采集 + LLM 智能筛选
 
 数据源：
   - akshare 东方财富概念板块（免费，无需积分）
-  - tushare 概念板块（需积分，用户 2000 积分充足）
+  - tushare 概念板块（需5000+积分，当前不可用，静默跳过）
+
+流程：
+  1. 获取全部东财概念名称（不做前缀过滤）
+  2. LLM 分批评估：国家政策关联度评分 + 分类 + 保留/丢弃
+  3. 按政策关联度降序排序，仅保留有价值的概念
+  4. 仅为保留的概念获取成分股（节省API调用）
 
 返回统一格式：
-  [{"concept": "固态电池", "stocks": ["300750.SZ", ...], "source": "akshare_em"}, ...]
+  [{"concept": "固态电池", "stocks": ["300750.SZ", ...], "source": "akshare_em",
+    "score": 8, "category": "新能源/新材料"}, ...]
 """
 from __future__ import annotations
 
+import json
 import time
 from loguru import logger
 
 from config.settings import settings
 
+
+# ── 股票代码转换 ────────────────────────────────────────────────────────────────
 
 def _em_code_to_ts_code(em_code: str) -> str:
     """东方财富6位纯数字代码 → tushare ts_code 格式"""
@@ -28,27 +38,216 @@ def _em_code_to_ts_code(em_code: str) -> str:
     return f"{code}.SZ"
 
 
-# 过滤掉无意义的短线情绪概念（非产业概念）
+# ── 缓存 key ───────────────────────────────────────────────────────────────────
+
+_CACHE_KEY = "cache:concept_llm_eval"
+_CACHE_TTL = 7 * 86400  # 7 天
+
+
+# ── LLM 评估 Prompt ───────────────────────────────────────────────────────────
+
+_EVAL_SYSTEM = "你是一位资深A股投研分析师，熟悉中国宏观经济与产业政策。仅输出JSON，不要解释。"
+
+_EVAL_PROMPT_TEMPLATE = """请对以下A股概念板块进行评估。
+
+对每个概念判断：
+1. **policy_score** (0-10分)：与国家政策的关联度
+   - 9-10分：直接对应国家重大战略（如碳中和、半导体自主可控、数字经济、军民融合）
+   - 6-8分：与产业政策密切相关（如新能源、新材料、高端制造、生物医药）
+   - 3-5分：有一定产业意义但政策关联较弱（如消费电子、家电、食品饮料细分）
+   - 0-2分：纯交易情绪概念、无产业意义、过于泛化
+
+2. **category**：所属产业分类（如 新能源/新材料/半导体/医药生物/消费升级/数字经济/高端制造/军工/金融/传统周期/其他）
+
+3. **keep** (true/false)：是否值得保留
+   - 保留标准：有明确产业方向、与国家政策或长期投资主题相关
+   - 丢弃标准：纯短线交易情绪（如昨日涨停、近端次新）、过于泛化、无产业方向
+
+返回 JSON 数组：
+[{{"name": "概念名", "score": 数字, "category": "分类", "keep": true/false}}]
+
+概念列表：
+{concepts_json}"""
+
+
+# ── LLM 智能筛选 ──────────────────────────────────────────────────────────────
+
+def llm_filter_concepts(concept_names: list[str]) -> list[dict]:
+    """
+    通过 LLM 对概念进行智能筛选和排序。
+
+    流程：
+      - 优先读取 Redis 缓存（7天有效）
+      - 仅对未缓存的概念调用 LLM 分批评估
+      - 按 policy_score 降序排序，返回 keep=True 的概念
+
+    返回: [{"name": "...", "score": int, "category": "..."}, ...]
+    """
+    from src.nodes.llm_utils import call_llm_json
+    import src.infrastructure.database as db
+
+    # 读取已缓存的评估
+    cached = _load_cached_eval(db.redis_client)
+
+    # 分离已缓存 / 待评估
+    results = []
+    to_eval = []
+    for name in concept_names:
+        if name in cached:
+            entry = cached[name]
+            if entry.get("keep", False):
+                results.append(entry)
+        else:
+            to_eval.append(name)
+
+    if to_eval:
+        logger.info("[ConceptFilter] LLM 评估: {} 个新概念需评估 ({} 个已缓存)",
+                     len(to_eval), len(concept_names) - len(to_eval))
+
+        batch_size = 80
+        new_eval = {}
+        for i in range(0, len(to_eval), batch_size):
+            batch = to_eval[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(to_eval) + batch_size - 1) // batch_size
+            logger.info("[ConceptFilter] LLM 批次 {}/{} ({} 个概念)",
+                         batch_num, total_batches, len(batch))
+
+            try:
+                prompt = _EVAL_PROMPT_TEMPLATE.format(
+                    concepts_json=json.dumps(batch, ensure_ascii=False)
+                )
+                resp = call_llm_json(
+                    prompt, model="flash", system=_EVAL_SYSTEM,
+                    max_tokens=4096, use_cache=True,
+                )
+                if isinstance(resp, list):
+                    for item in resp:
+                        name = item.get("name", "")
+                        if name:
+                            entry = {
+                                "name": name,
+                                "score": int(item.get("score", 0)),
+                                "category": item.get("category", "其他"),
+                                "keep": bool(item.get("keep", False)),
+                            }
+                            new_eval[name] = entry
+                            if entry["keep"]:
+                                results.append(entry)
+                else:
+                    logger.warning("[ConceptFilter] LLM 批次 {} 返回非数组", batch_num)
+            except Exception as e:
+                logger.warning("[ConceptFilter] LLM 批次 {} 失败: {}", batch_num, e)
+
+            # 避免 LLM 限流
+            if i + batch_size < len(to_eval):
+                time.sleep(1)
+
+        # 保存新评估结果到 Redis
+        if new_eval:
+            _save_cached_eval(db.redis_client, cached, new_eval)
+    else:
+        logger.info("[ConceptFilter] 全部 {} 个概念已有 LLM 缓存评估", len(concept_names))
+
+    # 按 policy_score 降序排序
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    kept = len(results)
+    dropped = len(concept_names) - kept
+    logger.info("[ConceptFilter] 筛选完成: 保留 {} 个, 丢弃 {} 个", kept, dropped)
+
+    # 打印 Top 10 高分概念供参考
+    if results:
+        top10 = results[:10]
+        logger.info("[ConceptFilter] Top10: {}",
+                     ", ".join(f"{r['name']}({r['score']}分)" for r in top10))
+
+    return results
+
+
+# ── 缓存读写 ──────────────────────────────────────────────────────────────────
+
+def _load_cached_eval(redis_client) -> dict:
+    """从 Redis 加载已缓存的 LLM 评估结果"""
+    if redis_client is None:
+        return {}
+    try:
+        raw = redis_client.get(_CACHE_KEY)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cached_eval(redis_client, old_cache: dict, new_eval: dict) -> None:
+    """合并新旧评估结果并保存到 Redis"""
+    if redis_client is None:
+        return
+    old_cache.update(new_eval)
+    try:
+        redis_client.setex(_CACHE_KEY, _CACHE_TTL,
+                           json.dumps(old_cache, ensure_ascii=False))
+    except Exception as e:
+        logger.warning("[ConceptFilter] 缓存写入失败: {}", e)
+
+
+# ── 降级策略 ──────────────────────────────────────────────────────────────────
+
 _FILTER_PREFIXES = ("昨日", "今日", "近端", "远端", "连续", "次新", "竞价")
 
 
-def _should_filter(name: str) -> bool:
-    """判断是否应过滤掉的概念（短线交易情绪类）"""
-    for prefix in _FILTER_PREFIXES:
-        if name.startswith(prefix):
-            return True
-    return False
+def _fallback_filter(concept_names: list[str], max_boards: int = 150) -> list[str]:
+    """LLM 不可用时的降级过滤：前缀过滤 + 截断"""
+    names = [n for n in concept_names if not n.startswith(tuple(_FILTER_PREFIXES))]
+    if max_boards > 0:
+        names = names[:max_boards]
+    return names
 
 
-def fetch_akshare_concepts(max_boards: int = 150, sleep_sec: float = 0.3) -> list[dict]:
+# ── 成分股获取 ─────────────────────────────────────────────────────────────────
+
+def fetch_concept_stocks(board_name: str, sleep_sec: float = 0.3) -> list[str]:
+    """获取单个概念板块的成分股列表（ts_code 格式）"""
+    try:
+        import akshare as ak
+        df_cons = ak.stock_board_concept_cons_em(symbol=board_name)
+        if df_cons is None or df_cons.empty:
+            return []
+
+        stocks = []
+        for _, row in df_cons.iterrows():
+            code = str(row.get("代码", "")).strip()
+            if code:
+                stocks.append(_em_code_to_ts_code(code))
+        return stocks
+    except Exception as e:
+        logger.warning("[ConceptSources] akshare 板块 '{}' 成分股失败: {}", board_name, e)
+        return []
+
+
+# ── 主入口 ────────────────────────────────────────────────────────────────────
+
+def fetch_akshare_concepts(
+    max_boards: int = 0,
+    sleep_sec: float = 0.3,
+    use_llm: bool = True,
+) -> list[dict]:
     """
-    从 akshare 获取东方财富概念板块列表 + 成分股。
+    从 akshare 获取东方财富概念板块 + LLM 智能筛选 + 成分股。
+
+    流程：
+      1. 获取全部概念名称（不做前缀过滤）
+      2. LLM 评估筛选（按政策关联度排序，丢弃无价值概念）
+      3. 仅为保留的概念获取成分股
 
     参数:
-      max_boards: 最多获取多少个板块（0=全部，默认150取最热门）
+      max_boards: LLM不可用时的降级截断数（默认0=不截断）
       sleep_sec: 成分股请求间隔秒数（防限流）
+      use_llm: 是否使用 LLM 筛选（False 则退化为前缀过滤+截断）
 
-    返回: [{"concept": "...", "stocks": ["300750.SZ",...], "source": "akshare_em"}, ...]
+    返回: [{"concept": "...", "stocks": [...], "source": "akshare_em",
+            "score": 8, "category": "..."}, ...]
     """
     try:
         import akshare as ak
@@ -56,68 +255,70 @@ def fetch_akshare_concepts(max_boards: int = 150, sleep_sec: float = 0.3) -> lis
         logger.warning("[ConceptSources] akshare 未安装，跳过东财概念数据")
         return []
 
-    results: list[dict] = []
-    filtered_count = 0
+    # Step 1: 获取全部概念名称
     try:
         df_boards = ak.stock_board_concept_name_em()
         if df_boards is None or df_boards.empty:
             logger.warning("[ConceptSources] akshare 东财概念列表为空")
             return []
 
-        board_names = df_boards["板块名称"].tolist()
-        # 过滤无意义的短线情绪概念
-        board_names = [n for n in board_names if not _should_filter(n)]
-        if max_boards > 0:
-            board_names = board_names[:max_boards]
-
-        logger.info("[ConceptSources] akshare 东财概念板块: 总 {} 个, 过滤后取 {} 个",
-                     len(df_boards), len(board_names))
-
-        for idx, board_name in enumerate(board_names, 1):
-            try:
-                df_cons = ak.stock_board_concept_cons_em(symbol=board_name)
-                if df_cons is None or df_cons.empty:
-                    continue
-
-                stocks = []
-                for _, row in df_cons.iterrows():
-                    code = str(row.get("代码", "")).strip()
-                    if code:
-                        stocks.append(_em_code_to_ts_code(code))
-
-                if stocks:
-                    results.append({
-                        "concept": board_name,
-                        "stocks": stocks,
-                        "source": "akshare_em",
-                    })
-
-                if idx % 30 == 0:
-                    logger.info("[ConceptSources] akshare 进度 {}/{} (已获取 {} 个板块)",
-                                idx, len(board_names), len(results))
-
-            except Exception as e:
-                logger.warning("[ConceptSources] akshare 板块 '{}' 成分股失败: {}", board_name, e)
-
-            if sleep_sec > 0:
-                time.sleep(sleep_sec)
-
-        logger.info("[ConceptSources] akshare 完成: {} 个板块（过滤 {} 个）", len(results), filtered_count)
+        all_names = df_boards["板块名称"].tolist()
+        logger.info("[ConceptSources] akshare 东财概念: {} 个", len(all_names))
     except Exception as e:
-        logger.warning("[ConceptSources] akshare 东财概念获取失败: {}", e)
+        logger.warning("[ConceptSources] akshare 东财概念列表获取失败: {}", e)
+        return []
 
+    # Step 2: LLM 筛选 或 降级过滤
+    selected_concepts = []  # [(name, score, category), ...]
+
+    if use_llm:
+        try:
+            llm_results = llm_filter_concepts(all_names)
+            selected_concepts = [
+                (r["name"], r["score"], r["category"])
+                for r in llm_results
+            ]
+        except Exception as e:
+            logger.warning("[ConceptSources] LLM 筛选失败，降级为前缀过滤: {}", e)
+
+    if not selected_concepts:
+        # 降级：前缀过滤 + 截断
+        fallback_names = _fallback_filter(all_names, max_boards or 150)
+        selected_concepts = [(n, 0, "") for n in fallback_names]
+        logger.info("[ConceptSources] 降级过滤: {} 个概念", len(selected_concepts))
+
+    # Step 3: 仅为选中的概念获取成分股
+    results = []
+    total = len(selected_concepts)
+    for idx, (name, score, category) in enumerate(selected_concepts, 1):
+        stocks = fetch_concept_stocks(name, sleep_sec=0)
+        if stocks:
+            results.append({
+                "concept": name,
+                "stocks": stocks,
+                "source": "akshare_em",
+                "score": score,
+                "category": category,
+            })
+
+        if idx % 30 == 0:
+            logger.info("[ConceptSources] 成分股进度 {}/{} (已获取 {} 个)",
+                         idx, total, len(results))
+
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+    logger.info("[ConceptSources] 完成: {} 个概念板块（共 {} 个候选）",
+                 len(results), total)
     return results
 
+
+# ── tushare 数据源（需5000+积分，当前不可用）─────────────────────────────────────
 
 def fetch_tushare_concepts(sleep_sec: float = 0.25) -> list[dict]:
     """
     从 tushare 获取概念板块 + 成分股。
-
-    使用 API:
-      - pro.concept()           → 概念列表
-      - pro.concept_detail(id)  → 概念成分股
-
-    返回: [{"concept": "...", "stocks": ["300750.SZ",...], "source": "tushare"}, ...]
+    当前2000积分不可用，保留代码供积分升级后自动生效。
     """
     try:
         import tushare as ts

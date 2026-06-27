@@ -251,15 +251,24 @@ def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict])
             concept_sources_set.add(board_source)
             stocks_list = list(stocks_detail.keys())
 
+            payload = {
+                "stocks": stocks_list,
+                "stocks_detail": stocks_detail,
+                "sources": list(concept_sources_set),
+                "confidence": 0.9,
+                "last_seen": now,
+            }
+            # 保存 LLM 评估的分数和分类（如有）
+            score = board.get("score", 0)
+            category = board.get("category", "")
+            if score:
+                payload["policy_score"] = score
+            if category:
+                payload["category"] = category
+
             redis_client.hset(
                 "dynamic:concepts", concept_name,
-                json.dumps({
-                    "stocks": stocks_list,
-                    "stocks_detail": stocks_detail,
-                    "sources": list(concept_sources_set),
-                    "confidence": 0.9,
-                    "last_seen": now,
-                }, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
             )
             count += 1
         except Exception as e:

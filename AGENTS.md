@@ -34,13 +34,17 @@ This file provides guidance to Qoder (qoder.com) when working with code in this 
 a_stock_agent/
 ├── config/
 │   ├── settings.py             # 全局配置（pydantic-settings，从 .env 读取）
-│   └── prompts/                # Prompt 模板（6个 .txt 文件）
+│   └── prompts/                # Prompt 模板（10个 .txt 文件）
 │       ├── policy_parser.txt   # 政策解读（两段式，--- 分隔）
 │       ├── chain_splitter.txt  # 产业链拆解
 │       ├── entity_mapper.txt   # 实体映射打分
 │       ├── news_coarse.txt     # 新闻粗筛
 │       ├── news_deep.txt       # 新闻深读
-│       └── sop_extractor.txt   # SOP 图谱提取
+│       ├── sop_extractor.txt   # SOP 图谱提取
+│       ├── concept_graph_extract.txt    # 政策文本→核心概念提取
+│       ├── concept_graph_expand.txt     # BFS扩展子概念
+│       ├── concept_graph_convergence.txt # 收敛判断
+│       └── concept_graph_insert.txt     # 增量插入定位
 ├── src/
 │   ├── infrastructure/         # 数据底座
 │   │   ├── database.py         # PG/ChromaDB/Redis 初始化 + ChromaDB v0.x 兼容层
@@ -62,7 +66,8 @@ a_stock_agent/
 │   │   ├── tech_ranker.py      # 步骤4: 技术面多因子打分（indicator_calc）
 │   │   ├── news_funnel.py      # 步骤5: 新闻漏斗（粗筛 Flash → 深读 Pro）
 │   │   ├── resonance_alert.py  # 步骤6: 三共振预警（消息+资金+量比）
-│   │   └── sop_learner.py      # SOP 自学习（pending → active, approved=FALSE）
+│   │   ├── sop_learner.py      # SOP 自学习（pending → active, approved=FALSE）
+│   │   └── concept_graph_builder.py # 政策概念图谱（BFS扩展+智能收敛+增量插入）
 │   ├── graphs/
 │   │   ├── static_graph.py     # 静态图谱 DAG（按需触发）
 │   │   └── dynamic_graph.py    # 动态监控 DAG（APScheduler 定时轮询）
@@ -70,19 +75,20 @@ a_stock_agent/
 │       └── indicator_calc.py   # 技术指标硬计算（禁止 LLM 替代）
 ├── scripts/                    # 运维/部署/诊断脚本
 │   └── view_output.py          # 系统输出查看器（交互式菜单）
-├── tests/                      # 测试套件（90 个用例）
+├── tests/                      # 测试套件（105 个用例）
 │   ├── conftest.py             # 共享 fixtures
 │   ├── test_phase1.py          # Phase 1: 配置 + 指标 + 降级链 + DDL
 │   ├── test_phase2.py          # Phase 2: DAG 节点 + 数据流格式
 │   ├── test_phase3.py          # Phase 3: 动态监控 + 三共振
 │   ├── test_phase4.py          # Phase 4: SOP + Prompt + LLM 工具
 │   ├── test_e2e.py             # E2E 集成测试（25 个，含真实 LLM/API 调用）
-│   └── test_full_chain.py      # 全业务链路测试（9 个，端到端 DAG 执行）
+│   ├── test_full_chain.py      # 全业务链路测试（9 个，端到端 DAG 执行）
+│   └── test_concept_graph.py   # 概念图谱单元测试（15 个）
 ├── api.py                      # FastAPI 接口（SOP审核 + 数据浏览 + 后台任务）
 ├── static/
 │   └── dashboard.html          # Web 数据仪表盘（SPA，7页面）
 ├── start.bat                   # 一键启动控制面板（双击运行）
-├── main.py                     # 系统入口（4 种运行模式）
+├── main.py                     # 系统入口（5 种运行模式）
 └── .env                        # 环境变量（不提交 Git）
 ```
 
@@ -106,6 +112,7 @@ a_stock_agent/
   ║   [6] 启动 SOP 审核平台（API Server）         ║
   ║   [7] 运行测试套件                            ║
   ║   [8] 查看系统输出                            ║
+  ║   [9] 构建政策概念图谱                        ║
   ╚═══════════════════════════════════════════════╝
 ```
 
@@ -136,13 +143,19 @@ python main.py --mode dynamic
 # 语义知识库初始化（主营业务向量化 → ChromaDB）
 python main.py --mode semantic
 
+# 政策概念图谱构建（自动下载十五五政策 → BFS扩展 → 智能收敛）
+python main.py --mode concept_graph
+
+# 政策概念图谱构建（指定政策文本）
+python main.py --mode concept_graph --policy-text "政策文本内容或文件路径"
+
 # 启动 SOP 审核 Web API
 uvicorn api:app --host 0.0.0.0 --port 8088
 
 # 查看系统输出数据
 python scripts/view_output.py
 
-# 运行全部测试（90 个用例）
+# 运行全部测试（105 个用例）
 pytest tests/ -v
 
 # 仅运行 Phase 单元测试（56 个，~2s）
@@ -153,6 +166,9 @@ pytest tests/test_e2e.py -v -s
 
 # 仅运行全业务链路测试（9 个，~107s，含 LLM Pro 调用）
 pytest tests/test_full_chain.py -v -s --tb=short
+
+# 仅运行概念图谱单元测试（15 个，~2s）
+pytest tests/test_concept_graph.py -v
 
 # 建立 SSH 隧道连接远程基础设施
 python scripts/start_ssh_tunnels.py
@@ -221,6 +237,11 @@ ChromaDB 服务端为 v0.5.x（REST API），客户端可能为 v1.x。项目使
 | `static:stock_pool` | 静态图谱结果 | 7d |
 | `dynamic:alerts:{YYYYMMDD}` | 当日预警 | 3d |
 | `dynamic:news_feed` | 最新消息面（Redis list，保留 500 条） | 永久 |
+| `concept_graph:edges` | 概念图谱边（child→JSON{parents,relevance,created_at}） | 30d |
+| `concept_graph:roots` | 概念图谱 Layer0 根节点集合 | 30d |
+| `concept_graph:layer:{depth}` | 概念图谱每层概念名集合 | 30d |
+| `concept_graph:build_progress` | 概念图谱构建进度（JSON） | 1h |
+| `concept_graph:build_lock` | 概念图谱并发构建锁 | 5min |
 
 ### Prompt 模板规范
 
@@ -284,7 +305,8 @@ git push
 | Phase 1-4 | `test_phase{1-4}.py` | 56 | ~2s | 单元测试，大量 Mock |
 | E2E | `test_e2e.py` | 25 | ~35s | 集成测试，真实 API 调用 |
 | Full Chain | `test_full_chain.py` | 9 | ~107s | 端到端 DAG 全链路执行 |
-| **合计** | | **90** | | |
+| Concept Graph | `test_concept_graph.py` | 15 | ~2s | 概念图谱单元测试 |
+| **合计** | | **105** | | |
 
 ### Full Chain 测试覆盖
 
@@ -420,8 +442,12 @@ python scripts/view_output.py stats
 | `/api/semantic` | GET | ChromaDB 语义搜索 |
 | `/api/stockpool` | GET | 静态图谱股池 |
 | `/api/news` | GET | 最新消息面（Redis list） |
-| `/api/run/{task}` | POST | 触发后台任务（init/semantic/static/dynamic） |
+| `/api/run/{task}` | POST | 触发后台任务（init/semantic/static/dynamic/concept_graph） |
 | `/api/tasks` | GET | 查看任务状态和实时日志 |
+| `/api/concept-graph/build` | POST | 触发概念图谱全量构建 |
+| `/api/concept-graph/progress` | GET | 查询概念图谱构建进度 |
+| `/api/concept-graph/add-concept` | POST | 手动添加概念并展开子图 |
+| `/api/concept-graph/tree` | GET | 获取概念图谱层级树结构 |
 | `/alerts/today` | GET | 今日三共振预警 |
 | `/sop/pending` | GET | 待审核 SOP |
 | `/sop/active` | GET | 已审核 SOP |

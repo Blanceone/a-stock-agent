@@ -51,9 +51,11 @@ def run_static(pdf_path: str) -> None:
 _shared_concepts: list[dict] = []
 
 
-def _persist_concept_stocks(redis_client, concept_terms: list[str], ts_codes: list[str]):
+def _persist_concept_stocks(redis_client, concept_terms: list[str],
+                            ts_codes: list[str], source: str = "llm",
+                            stock_names: dict[str, str] | None = None):
     """将概念词→关联股票映射写入 Redis hash dynamic:concepts
-    结构: field=concept_name, value=JSON{stocks:[], confidence, last_seen}
+    结构: field=concept_name, value=JSON{stocks_detail:{ts_code:{sources:[], name:""}}, sources:[], last_seen}
     """
     if not concept_terms or not redis_client:
         return
@@ -64,23 +66,124 @@ def _persist_concept_stocks(redis_client, concept_terms: list[str], ts_codes: li
             continue
         try:
             existing_raw = redis_client.hget("dynamic:concepts", term)
-            existing_stocks: list[str] = []
+            stocks_detail: dict[str, dict] = {}
+            concept_sources_set: set[str] = set()
             if existing_raw:
                 existing = json.loads(existing_raw)
-                existing_stocks = existing.get("stocks", [])
-            # 合并新发现的股票代码（去重）
-            merged = list(set(existing_stocks + (ts_codes or [])))
+                stocks_detail = existing.get("stocks_detail", {})
+                concept_sources_set = set(existing.get("sources", []))
+                # 兼容旧格式：从 stocks 数组迁移
+                if not stocks_detail and "stocks" in existing:
+                    for sc in existing["stocks"]:
+                        stocks_detail[sc] = {"sources": ["llm"], "name": ""}
+
+            # 添加/更新股票（合并来源）
+            for ts_code in (ts_codes or []):
+                if ts_code in stocks_detail:
+                    if source not in stocks_detail[ts_code].get("sources", []):
+                        stocks_detail[ts_code]["sources"].append(source)
+                else:
+                    name = (stock_names or {}).get(ts_code, "")
+                    stocks_detail[ts_code] = {"sources": [source], "name": name}
+
+            concept_sources_set.add(source)
+            stocks_list = list(stocks_detail.keys())
+
             redis_client.hset(
                 "dynamic:concepts", term,
                 json.dumps({
-                    "stocks": merged,
-                    "confidence": 0.8,
+                    "stocks": stocks_list,
+                    "stocks_detail": stocks_detail,
+                    "sources": list(concept_sources_set),
+                    "confidence": 0.85,
                     "last_seen": now,
                 }, ensure_ascii=False),
             )
             redis_client.expire("dynamic:concepts", 7 * 86400)
         except Exception as e:
             logger.debug("[Main] 概念持久化失败 {}: {}", term, e)
+
+
+def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict]):
+    """将外部概念数据（akshare/tushare）批量写入 Redis dynamic:concepts"""
+    if not redis_client or not concepts_data:
+        return
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    count = 0
+    for board in concepts_data:
+        concept_name = board.get("concept", "")
+        stocks = board.get("stocks", [])
+        board_source = board.get("source", source)
+        if not concept_name or not stocks:
+            continue
+        try:
+            existing_raw = redis_client.hget("dynamic:concepts", concept_name)
+            stocks_detail: dict[str, dict] = {}
+            concept_sources_set: set[str] = set()
+            if existing_raw:
+                existing = json.loads(existing_raw)
+                stocks_detail = existing.get("stocks_detail", {})
+                concept_sources_set = set(existing.get("sources", []))
+                if not stocks_detail and "stocks" in existing:
+                    for sc in existing["stocks"]:
+                        stocks_detail[sc] = {"sources": ["llm"], "name": ""}
+
+            for ts_code in stocks:
+                if ts_code in stocks_detail:
+                    if board_source not in stocks_detail[ts_code].get("sources", []):
+                        stocks_detail[ts_code]["sources"].append(board_source)
+                else:
+                    stocks_detail[ts_code] = {"sources": [board_source], "name": ""}
+
+            concept_sources_set.add(board_source)
+            stocks_list = list(stocks_detail.keys())
+
+            redis_client.hset(
+                "dynamic:concepts", concept_name,
+                json.dumps({
+                    "stocks": stocks_list,
+                    "stocks_detail": stocks_detail,
+                    "sources": list(concept_sources_set),
+                    "confidence": 0.9,
+                    "last_seen": now,
+                }, ensure_ascii=False),
+            )
+            count += 1
+        except Exception as e:
+            logger.debug("[Main] 概念同步失败 {}: {}", concept_name, e)
+
+    if count > 0:
+        redis_client.expire("dynamic:concepts", 7 * 86400)
+        logger.info("[Main] 概念同步 {}: 写入 {} 个概念", source, count)
+
+
+async def concept_sync_job():
+    """定时同步 akshare + tushare 概念板块数据到 Redis"""
+    import src.infrastructure.database as db
+    from src.infrastructure.concept_sources import fetch_akshare_concepts, fetch_tushare_concepts
+
+    if db.redis_client is None:
+        logger.warning("[Main] concept_sync_job: Redis 未连接，跳过")
+        return
+
+    logger.info("[Main] ===== 概念板块同步开始 =====")
+
+    # akshare 东财概念
+    try:
+        akshare_data = await asyncio.to_thread(fetch_akshare_concepts)
+        sync_concepts_to_redis(db.redis_client, "akshare_em", akshare_data)
+    except Exception as e:
+        logger.warning("[Main] akshare 概念同步失败: {}", e)
+
+    # tushare 概念
+    try:
+        tushare_data = await asyncio.to_thread(fetch_tushare_concepts)
+        sync_concepts_to_redis(db.redis_client, "tushare", tushare_data)
+    except Exception as e:
+        logger.warning("[Main] tushare 概念同步失败: {}", e)
+
+    logger.info("[Main] ===== 概念板块同步完成 =====")
 
 
 async def run_dynamic() -> None:
@@ -120,6 +223,18 @@ async def run_dynamic() -> None:
                         "status": "analyzed",
                         "news_score": news_result.get("news_score", 0),
                         "impact_type": news_result.get("impact_type", ""),
+                        "impact_concept": news_result.get("impact_concept", ""),
+                        "impact_node": news_result.get("impact_node", ""),
+                        "sentiment": news_result.get("sentiment", "neutral"),
+                        "reason": news_result.get("reason", ""),
+                        "mentioned_companies": json.dumps(
+                            news_result.get("mentioned_companies", []),
+                            ensure_ascii=False,
+                        ),
+                        "supply_chain_impact": json.dumps(
+                            news_result.get("supply_chain_impact", []),
+                            ensure_ascii=False,
+                        ),
                         "related_ts_codes": json.dumps(
                             news_result.get("related_ts_codes", []),
                             ensure_ascii=False,
@@ -135,6 +250,36 @@ async def run_dynamic() -> None:
                         news_result.get("new_concept_terms", []),
                         news_result.get("related_ts_codes", []),
                     )
+                    # 概念→新闻反向映射（Sorted Set）+ 概念→股票评分（Hash）
+                    import time as _time
+                    _ts = _time.time()
+                    _all_concepts = list(set(
+                        (news_result.get("impact_concept") or "") and [news_result.get("impact_concept")] or []
+                    ) + (news_result.get("new_concept_terms", [])))
+                    _all_concepts = [c for c in _all_concepts if c]
+                    if _all_concepts:
+                        _news_score = news_result.get("news_score", 0)
+                        _news_summary = json.dumps({
+                            "title": news_result.get("news_title", ""),
+                            "sentiment": news_result.get("sentiment", "neutral"),
+                            "score": _news_score,
+                            "ts": _ts,
+                        }, ensure_ascii=False)
+                        _related_codes = news_result.get("related_ts_codes", [])
+                        _pipe = db.redis_client.pipeline(transaction=False)
+                        for _concept in _all_concepts:
+                            _key_news = f"dynamic:concept_news:{_concept}"
+                            _key_scores = f"dynamic:concept_stock_scores:{_concept}"
+                            _pipe.zadd(_key_news, {_news_summary: _ts})
+                            _pipe.zremrangebyrank(_key_news, 0, -201)  # 保留最近 200 条
+                            _pipe.expire(_key_news, 7 * 86400)
+                            for _tc in _related_codes:
+                                _pipe.hincrbyfloat(_key_scores, _tc, _news_score)
+                            _pipe.expire(_key_scores, 7 * 86400)
+                        try:
+                            _pipe.execute()
+                        except Exception as _pe:
+                            logger.debug("[Main] 反向映射写入失败: {}", _pe)
                 else:
                     analysis = {"status": "filtered", "news_score": 0}
 
@@ -181,6 +326,11 @@ async def run_dynamic() -> None:
         day_of_week="mon-fri", hour=15, minute=30
     ))
 
+    # 概念板块同步：工作日 09:00（akshare + tushare）
+    scheduler.add_job(concept_sync_job, CronTrigger(
+        day_of_week="mon-fri", hour=9, minute=0
+    ))
+
     # SOP 自学习：周日 02:00
     async def sop_learning_job():
         logger.info("[Scheduler] sop_learning_job 触发")
@@ -196,6 +346,10 @@ async def run_dynamic() -> None:
     ))
 
     scheduler.start()
+
+    # 启动时立即执行一次概念同步（后台异步，不阻塞新闻流）
+    asyncio.create_task(concept_sync_job())
+
     logger.info("[Main] 动态监控已启动，按 Ctrl+C 停止")
     try:
         while True:

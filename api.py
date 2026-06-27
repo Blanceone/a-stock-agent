@@ -362,17 +362,24 @@ def news_feed(limit: int = Query(50, ge=10, le=200)):
                 items.append(json.loads(raw))
             except (json.JSONDecodeError, TypeError):
                 continue
-        # 合并分析结果（从 Redis hash dynamic:news_analysis 读取）
-        for item in items:
-            aid = item.get("article_id", "")
-            if aid:
-                analysis_raw = r.hget("dynamic:news_analysis", aid)
-                if analysis_raw:
+        # 合并分析结果（pipeline 批量查询，避免 N+1）
+        aid_list = [item.get("article_id", "") for item in items if item.get("article_id")]
+        analysis_map: dict[str, dict] = {}
+        if aid_list:
+            pipe = r.pipeline(transaction=False)
+            for aid in aid_list:
+                pipe.hget("dynamic:news_analysis", aid)
+            pipe_results = pipe.execute()
+            for aid, raw in zip(aid_list, pipe_results):
+                if raw:
                     try:
-                        analysis = json.loads(analysis_raw)
-                        item["analysis"] = analysis
+                        analysis_map[aid] = json.loads(raw)
                     except (json.JSONDecodeError, TypeError):
                         pass
+        for item in items:
+            aid = item.get("article_id", "")
+            if aid in analysis_map:
+                item["analysis"] = analysis_map[aid]
         # 按 pub_time 倒序（最新排最前）
         items.sort(key=lambda x: x.get("pub_time", ""), reverse=True)
         feed_len = r.llen(REDIS_KEY_NEWS_FEED) or 0
@@ -404,9 +411,13 @@ def concepts_page():
         for term, raw in all_concepts.items():
             try:
                 data = json.loads(raw)
+                stocks_detail = data.get("stocks_detail", {})
+                stocks_list = data.get("stocks", list(stocks_detail.keys()))
                 items.append({
                     "concept": term,
-                    "stocks": data.get("stocks", []),
+                    "stocks": stocks_list,
+                    "stock_count": len(stocks_list),
+                    "sources": data.get("sources", ["llm"]),
                     "confidence": data.get("confidence", 0),
                     "last_seen": data.get("last_seen", ""),
                 })
@@ -416,10 +427,23 @@ def concepts_page():
         # 按最后出现时间倒序
         items.sort(key=lambda x: x.get("last_seen", ""), reverse=True)
 
-        # 批量查询股票名称
+        # 批量查询股票名称（从 stocks_detail 取所有代码）
         all_codes = set()
-        for it in items:
-            all_codes.update(it["stocks"])
+        concept_stocks_detail: dict[str, dict[str, dict]] = {}
+        for term, raw in all_concepts.items():
+            try:
+                data = json.loads(raw)
+                sd = data.get("stocks_detail", {})
+                concept_stocks_detail[term] = sd
+                all_codes.update(sd.keys())
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 如果 stocks_detail 为空，回退到 stocks 数组
+        if not all_codes:
+            for it in items:
+                all_codes.update(it["stocks"])
+
         stock_names: dict[str, str] = {}
         if all_codes:
             try:
@@ -437,21 +461,109 @@ def concepts_page():
             except Exception:
                 pass
 
-        # 将股票名称信息注入到每个概念中
+        # 将股票名称 + 来源信息注入到每个概念中
         for it in items:
+            concept = it["concept"]
+            sd = concept_stocks_detail.get(concept, {})
             enriched = []
             for code in it["stocks"]:
                 info = stock_names.get(code, {})
+                detail = sd.get(code, {})
                 enriched.append({
                     "ts_code": code,
-                    "name": info.get("name", ""),
+                    "name": info.get("name", "") or detail.get("name", ""),
                     "industry": info.get("industry", ""),
+                    "sources": detail.get("sources", ["llm"]),
                 })
             it["stocks_detail"] = enriched
 
         return {"count": len(items), "items": items, "redis": True}
     except Exception as e:
         return {"count": 0, "items": [], "redis": True, "error": str(e)}
+
+
+@app.get("/api/concepts/{concept_name}")
+def concept_detail(concept_name: str):
+    """概念详情：股票排名（含来源） + 相关新闻"""
+    r = ensure_redis()
+    if r is None:
+        return {"redis": False, "error": "Redis 未连接"}
+    try:
+        # 1. 概念基础数据
+        raw = r.hget("dynamic:concepts", concept_name)
+        if not raw:
+            return {"error": f"概念 '{concept_name}' 不存在"}
+        data = json.loads(raw)
+
+        stocks_detail = data.get("stocks_detail", {})
+        stocks_list = list(stocks_detail.keys())
+        sources = data.get("sources", ["llm"])
+
+        # 2. 股票评分（从 concept_stock_scores hash）
+        scores_raw = r.hgetall(f"dynamic:concept_stock_scores:{concept_name}")
+        score_map: dict[str, float] = {}
+        if scores_raw:
+            for code, val in scores_raw.items():
+                code_str = code.decode("utf-8") if isinstance(code, bytes) else code
+                try:
+                    score_map[code_str] = float(val)
+                except (ValueError, TypeError):
+                    score_map[code_str] = 0.0
+
+        # 3. 从 PG 获取股票名称/行业
+        stock_names: dict[str, dict] = {}
+        if stocks_list:
+            try:
+                conn = get_pg_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT ts_code, name, industry FROM stock_basic WHERE ts_code = ANY(%s)",
+                            (stocks_list,),
+                        )
+                        for row in cur.fetchall():
+                            stock_names[row[0]] = {"name": row[1], "industry": row[2]}
+                finally:
+                    release_pg_conn(conn)
+            except Exception:
+                pass
+
+        # 4. 构建排名列表（按评分降序）
+        stocks_ranked = []
+        for code in stocks_list:
+            detail = stocks_detail.get(code, {})
+            info = stock_names.get(code, {})
+            stocks_ranked.append({
+                "ts_code": code,
+                "name": info.get("name", "") or detail.get("name", ""),
+                "industry": info.get("industry", ""),
+                "score": score_map.get(code, 0.0),
+                "sources": detail.get("sources", ["llm"]),
+            })
+        stocks_ranked.sort(key=lambda x: x["score"], reverse=True)
+
+        # 5. 相关新闻（Sorted Set，最近10条）
+        related_news = []
+        try:
+            news_raw = r.zrevrange(f"dynamic:concept_news:{concept_name}", 0, 9)
+            for raw_item in news_raw:
+                try:
+                    item_str = raw_item.decode("utf-8") if isinstance(raw_item, bytes) else raw_item
+                    related_news.append(json.loads(item_str))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except Exception:
+            pass
+
+        return {
+            "concept": concept_name,
+            "sources": sources,
+            "stocks_ranked": stocks_ranked,
+            "related_news": related_news,
+            "redis": True,
+        }
+    except Exception as e:
+        return {"error": str(e), "redis": True}
 
 
 # ── 后台任务管理 ────────────────────────────────────────────────────────────

@@ -77,6 +77,89 @@ def _summarize(name: str, ts_code: str, raw_text: str) -> str:
     return result.strip()[:500]
 
 
+# ── 概念分类 Prompt ─────────────────────────────────────────────────────────────
+import json as _json
+from pathlib import Path as _Path
+
+_CONCEPT_CLASSIFY_PROMPT_PATH = _Path(__file__).parent.parent.parent / "config" / "prompts" / "concept_classify.txt"
+
+
+def _get_known_concepts() -> list[str]:
+    """从 Redis dynamic:concepts 读取所有已有概念名称"""
+    if database.redis_client is None:
+        return []
+    try:
+        keys = database.redis_client.hkeys("dynamic:concepts")
+        return [k.decode("utf-8") if isinstance(k, bytes) else k for k in keys]
+    except Exception:
+        return []
+
+
+def _classify_concepts(name: str, ts_code: str, summary: str, concept_list: list[str]) -> list[str]:
+    """V4-Flash 概念分类：从已有概念列表中选取匹配项"""
+    if not concept_list:
+        return []
+    try:
+        prompt_text = _CONCEPT_CLASSIFY_PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = prompt_text.format(
+            concept_list="\n".join(f"- {c}" for c in concept_list[:200]),
+            name=name, ts_code=ts_code, summary=summary[:300],
+        )
+        raw = call_llm(prompt, model="flash", system="你是A股概念分类助手。", max_tokens=256)
+        data = _json.loads(raw.strip())
+        result = data.get("concepts", [])
+        # 只保留确实在已知列表中的概念
+        valid_set = set(concept_list)
+        return [c for c in result if c in valid_set][:5]
+    except Exception as e:
+        logger.debug("[SemanticInit] 概念分类失败 {}/{}: {}", ts_code, name, e)
+        return []
+
+
+def _persist_llm_concepts(redis_client, concepts: list[str], ts_code: str, name: str):
+    """将 LLM 分类结果写入 Redis dynamic:concepts（source=llm_classify）"""
+    if not redis_client or not concepts:
+        return
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    for concept in concepts:
+        try:
+            existing_raw = redis_client.hget("dynamic:concepts", concept)
+            stocks_detail: dict[str, dict] = {}
+            concept_sources_set: set[str] = set()
+            if existing_raw:
+                existing = _json.loads(existing_raw)
+                stocks_detail = existing.get("stocks_detail", {})
+                concept_sources_set = set(existing.get("sources", []))
+                if not stocks_detail and "stocks" in existing:
+                    for sc in existing["stocks"]:
+                        stocks_detail[sc] = {"sources": ["llm"], "name": ""}
+
+            if ts_code in stocks_detail:
+                if "llm_classify" not in stocks_detail[ts_code].get("sources", []):
+                    stocks_detail[ts_code]["sources"].append("llm_classify")
+                stocks_detail[ts_code]["name"] = name
+            else:
+                stocks_detail[ts_code] = {"sources": ["llm_classify"], "name": name}
+
+            concept_sources_set.add("llm_classify")
+            stocks_list = list(stocks_detail.keys())
+
+            redis_client.hset(
+                "dynamic:concepts", concept,
+                _json.dumps({
+                    "stocks": stocks_list,
+                    "stocks_detail": stocks_detail,
+                    "sources": list(concept_sources_set),
+                    "confidence": 0.8,
+                    "last_seen": now,
+                }, ensure_ascii=False),
+            )
+            redis_client.expire("dynamic:concepts", 7 * 86400)
+        except Exception as e:
+            logger.debug("[SemanticInit] 概念持久化失败 {}: {}", concept, e)
+
+
 def run() -> dict:
     """
     语义知识库初始化主流程。
@@ -100,10 +183,15 @@ def run() -> dict:
     logger.info("[SemanticInit] 待处理 {} 只（跳过已入库的 {} 只）",
                 len(pending), len(stocks) - len(pending))
 
-    stats = {"total": len(pending), "success": 0, "failed": 0, "skipped": 0}
+    stats = {"total": len(pending), "success": 0, "failed": 0, "skipped": 0,
+             "concept_classified": 0}
     batch_ids: list[str] = []
     batch_docs: list[str] = []
     batch_metas: list[dict] = []
+
+    # 4. 读取已知概念列表（用于 LLM 分类）
+    known_concepts = _get_known_concepts()
+    logger.info("[SemanticInit] 已有 {} 个概念可用于分类", len(known_concepts))
 
     for idx, stock in enumerate(pending, 1):
         ts_code = stock["ts_code"]
@@ -129,6 +217,17 @@ def run() -> dict:
             stats["failed"] += 1
             time.sleep(0.2)
             continue
+
+        # LLM 概念分类（与 tushare/akshare 取并集）
+        if known_concepts:
+            try:
+                llm_concepts = _classify_concepts(name, ts_code, summary, known_concepts)
+                if llm_concepts:
+                    _persist_llm_concepts(database.redis_client, llm_concepts, ts_code, name)
+                    stats["concept_classified"] += 1
+                    logger.debug("[SemanticInit] {} {} 分类到: {}", ts_code, name, llm_concepts)
+            except Exception as e:
+                logger.debug("[SemanticInit] 概念分类异常 {}: {}", ts_code, e)
 
         # 批量累积
         batch_ids.append(ts_code)
@@ -169,8 +268,8 @@ def run() -> dict:
             logger.error("[SemanticInit] 最终批次写入失败: {}", e)
 
     logger.info(
-        "[SemanticInit] ===== 完成 ===== 总计 {} | 成功 {} | 失败 {} | ChromaDB 总量 {}",
+        "[SemanticInit] ===== 完成 ===== 总计 {} | 成功 {} | 失败 {} | 概念分类 {} | ChromaDB 总量 {}",
         stats["total"], stats["success"], stats["failed"],
-        database.chroma_collection.count(),
+        stats["concept_classified"], database.chroma_collection.count(),
     )
     return stats

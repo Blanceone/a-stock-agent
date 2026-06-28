@@ -279,7 +279,8 @@ async function renderOverview() {
   html += `<div class="action-btn" onclick="triggerTask('semantic')" data-task="semantic"><div class="action-icon">&#9782;</div><div class="action-label">语义初始化</div><div class="action-desc">主营业务向量化入库 ChromaDB</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('static')" data-task="static"><div class="action-icon">&#9733;</div><div class="action-label">静态图谱构建</div><div class="action-desc">产业链分析 + 选股评分</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('dynamic')" data-task="dynamic"><div class="action-icon">&#9888;</div><div class="action-label">动态监控</div><div class="action-desc">RSS轮询 + 三共振预警</div></div>`;
-  html += `<div class="action-btn" onclick="shutdownAll()" style="border-color:var(--red);opacity:0.85"><div class="action-icon" style="color:var(--red)">&#9211;</div><div class="action-label" style="color:var(--red)">安全关闭</div><div class="action-desc">停止所有后台任务和 SSH 隧道</div></div>`;
+  html += `<div class="action-btn" onclick="shutdownAll()" style="border-color:var(--red);opacity:0.85"><div class="action-icon" style="color:var(--red)">&#9211;</div><div class="action-label" style="color:var(--red)">安全关闭</div><div class="action-desc">落盘缓存 + 停止所有后台任务</div></div>`;
+  html += `<div class="action-btn" onclick="runPreflight()" style="border-color:var(--purple);opacity:0.85"><div class="action-icon" style="color:var(--purple)">&#9745;</div><div class="action-label" style="color:var(--purple)">系统检查</div><div class="action-desc">检查所有基础设施状态</div></div>`;
   html += '</div>';
   html += '<div class="task-list" id="taskList"></div>';
   html += '</div>';
@@ -298,13 +299,52 @@ async function triggerTask(name) {
 }
 
 async function shutdownAll() {
-  if (!confirm('确定要安全关闭所有后台任务和 SSH 隧道吗？')) return;
+  if (!confirm('确定要安全关闭吗？\n\n将先落盘缓存数据，然后停止所有后台任务。')) return;
+  const statusEl = document.querySelector('.task-list');
   try {
-    const r = await fetch('/api/shutdown', {method:'POST'});
+    if (statusEl) statusEl.innerHTML = '<div class="task-item"><div class="task-header"><span class="task-name">正在安全关闭...</span><span class="task-status running">执行中</span></div><div class="task-log">正在落盘缓存数据并停止后台任务...</div></div>';
+    const r = await fetch('/api/shutdown?flush=true&kill_processes=false', {method:'POST'});
     const d = await r.json();
-    alert(d.message || '关闭完成');
-    pollTasks();
-  } catch(e) { alert('关闭请求失败: ' + e.message); }
+    let log = '';
+    if (d.steps) {
+      for (const s of d.steps) {
+        const icon = s.success ? '✓' : '✗';
+        log += `${icon} ${s.name}: ${s.message} (${s.elapsed_ms}ms)\n`;
+      }
+    }
+    if (d.killed) d.killed.forEach(k => { log += `✓ 已停止: ${k.task} (PID ${k.pid})\n`; });
+    if (d.errors) d.errors.forEach(e => { log += `✗ 失败: ${e.task}: ${e.error}\n`; });
+    log += `\n${d.message || '关闭完成'}`;
+    if (statusEl) statusEl.innerHTML = `<div class="task-item"><div class="task-header"><span class="task-name">安全关闭完成</span><span class="task-status done">完成</span></div><div class="task-log">${escHtml(log)}</div></div>`;
+    else alert(d.message || '关闭完成');
+  } catch(e) {
+    if (statusEl) statusEl.innerHTML = `<div class="task-item"><div class="task-header"><span class="task-name">关闭失败</span><span class="task-status failed">失败</span></div><div class="task-log">${escHtml(e.message)}</div></div>`;
+    else alert('关闭请求失败: ' + e.message);
+  }
+}
+
+async function runPreflight() {
+  const c = document.getElementById('content');
+  const panel = document.querySelector('.task-list');
+  if (panel) panel.innerHTML = '<div class="task-item"><div class="task-header"><span class="task-name">正在执行系统检查...</span><span class="task-status running">检查中</span></div></div>';
+  try {
+    const r = await fetch('/api/preflight');
+    const d = await r.json();
+    let log = '';
+    for (const r of d.results) {
+      const icon = r.passed ? '✓' : '✗';
+      log += `${icon} ${r.name}: ${r.message}\n`;
+    }
+    const allOk = d.all_passed;
+    log += `\n${allOk ? '✓ 全部检查通过!' : '✗ 有检查项未通过'}`;
+    if (panel) {
+      panel.innerHTML = `<div class="task-item"><div class="task-header"><span class="task-name">系统检查${allOk ? ' - 全部通过' : ' - 有异常'}</span><span class="task-status ${allOk ? 'done' : 'failed'}">${allOk ? '通过' : '异常'}</span></div><div class="task-log">${escHtml(log)}</div></div>`;
+    } else {
+      alert(log);
+    }
+  } catch(e) {
+    alert('检查请求失败: ' + e.message);
+  }
 }
 
 let _activeTasks = [];

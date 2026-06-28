@@ -11,6 +11,7 @@ echo  +=====================================================+
 echo  ^|       A股宏观锚定投研智能体 - 控制面板              ^|
 echo  +-----------------------------------------------------+
 echo  ^|                                                     ^|
+echo  ^|  [0] 启动前状态检查                                  ^|
 echo  ^|  [1] 一键启动 (SSH + 动态监控 + API)                ^|
 echo  ^|  [2] 首次初始化 (建表 + 全A股入库)                  ^|
 echo  ^|  [3] 语义知识库初始化 (ChromaDB向量化)               ^|
@@ -25,8 +26,9 @@ echo  ^|  [Q] 退出                                           ^|
 echo  ^|                                                     ^|
 echo  +=====================================================+
 echo.
-set /p choice="  请选择 [1-9/Q]: "
+set /p choice="  请选择 [0-9/Q]: "
 
+if /i "%choice%"=="0" goto PREFLIGHT
 if /i "%choice%"=="1" goto START_ALL
 if /i "%choice%"=="2" goto INIT
 if /i "%choice%"=="3" goto SEMANTIC
@@ -42,12 +44,28 @@ echo  [!] 无效选择
 timeout /t 2 >nul
 goto MENU
 
+:PREFLIGHT
+cls
+echo.
+echo  =====================================================
+echo    启动前状态检查
+echo  =====================================================
+echo.
+python scripts\preflight_check.py
+echo.
+pause
+goto MENU
+
 :START_ALL
 cls
 echo.
 echo  =====================================================
 echo    一键启动 - 完整模式
 echo  =====================================================
+echo.
+echo  [预检] 启动前状态检查...
+python scripts\preflight_check.py --auto-fix
+if errorlevel 2 goto MENU
 echo.
 echo  [0/3] 清理旧进程...
 taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1
@@ -118,6 +136,10 @@ echo  =====================================================
 echo    动态监控模式
 echo  =====================================================
 echo.
+echo  [预检] 启动前状态检查...
+python scripts\preflight_check.py --auto-fix
+if errorlevel 2 goto MENU
+echo.
 echo  每1分钟轮询财联社电报 -- 新闻漏斗 -- 三共振检查
 echo  按 Ctrl+C 停止
 echo.
@@ -154,6 +176,10 @@ echo  =====================================================
 echo    SOP 审核平台
 echo  =====================================================
 echo.
+echo  [预检] 启动前状态检查...
+python scripts\preflight_check.py --auto-fix
+if errorlevel 2 goto MENU
+echo.
 echo  启动中... 浏览器访问 http://localhost:8088
 uvicorn api:app --host 0.0.0.0 --port 8088
 goto MENU
@@ -186,10 +212,11 @@ echo  =====================================================
 echo    安全关闭所有服务
 echo  =====================================================
 echo.
-echo  [1/2] 通过 API 停止后台任务...
-curl -s -X POST http://localhost:8088/api/shutdown 2>nul
+echo  [1/3] 缓存数据落盘 + 停止后台任务...
+curl -s -X POST "http://localhost:8088/api/shutdown?flush=true&kill_processes=true" 2>nul
 echo.
-echo  [2/2] 清理残留进程...
+echo.
+echo  [2/3] 清理残留进程...
 taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq API-Server*" /F >nul 2>&1
 for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /fo list 2^>nul ^| findstr "PID:"') do (
@@ -198,6 +225,11 @@ for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /fo list 2^>nu
         echo    已终止 python 进程 PID=%%a
     )
 )
+echo.
+echo  [3/3] 验证端口已释放...
+netstat -ano | findstr ":8088 " >nul 2>&1 && echo    [!] 端口 8088 仍被占用 || echo    [OK] 端口 8088 已释放
+netstat -ano | findstr ":5432 " >nul 2>&1 && echo    [!] 端口 5432 仍被占用 || echo    [OK] 端口 5432 已释放
+netstat -ano | findstr ":6379 " >nul 2>&1 && echo    [!] 端口 6379 仍被占用 || echo    [OK] 端口 6379 已释放
 echo.
 echo  所有服务已安全关闭。
 pause

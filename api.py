@@ -40,6 +40,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
 from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, ensure_redis, init_all, close_all
+from scripts.preflight_check import run_preflight, auto_fix as preflight_auto_fix
+from src.infrastructure.shutdown import (
+    full_shutdown, flush_redis_to_pg, flush_redis_to_file,
+    stop_background_tasks, kill_ssh_tunnels, kill_api_server, kill_dynamic_monitor,
+)
 
 
 # ── Lifespan: 替代废弃的 on_event ────────────────────────────────────────────
@@ -48,6 +53,12 @@ async def lifespan(app: FastAPI):
     """启动时初始化数据库连接，关闭时释放资源"""
     init_all()
     yield
+    # 退出前尝试落盘缓存数据
+    try:
+        flush_redis_to_pg()
+        flush_redis_to_file()
+    except Exception as e:
+        logger.warning("[Lifespan] 缓存落盘失败: {}", e)
     close_all()
 
 
@@ -202,6 +213,43 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+
+# ── Preflight 检查 API ────────────────────────────────────────────────────────
+
+@app.get("/api/preflight")
+def preflight_check(checks: str = Query(None, description="逗号分隔的检查项")):
+    """执行启动前状态检查"""
+    report = run_preflight(checks)
+    return {
+        "all_passed": report.all_passed,
+        "results": [
+            {
+                "name": r.name, "key": r.key,
+                "passed": r.passed, "message": r.message,
+                "fixable": r.fixable, "elapsed_ms": r.elapsed_ms,
+            }
+            for r in report.results
+        ],
+    }
+
+
+@app.post("/api/preflight/fix")
+def preflight_fix(checks: str = Query(None)):
+    """自动修复后重新检查"""
+    report = run_preflight(checks)
+    fixed_report = preflight_auto_fix(report)
+    return {
+        "all_passed": fixed_report.all_passed,
+        "results": [
+            {
+                "name": r.name, "key": r.key,
+                "passed": r.passed, "message": r.message,
+                "fixable": r.fixable, "elapsed_ms": r.elapsed_ms,
+            }
+            for r in fixed_report.results
+        ],
+    }
 
 
 # ── 数据浏览 API ─────────────────────────────────────────────────────────────
@@ -754,8 +802,25 @@ def list_tasks():
 
 
 @app.post("/api/shutdown")
-def shutdown_all():
-    """安全关闭所有后台任务进程"""
+def shutdown_all(
+    flush: bool = Query(True, description="是否先落盘缓存数据"),
+    kill_processes: bool = Query(True, description="是否终止外部进程"),
+):
+    """安全关闭：落盘缓存 + 停止任务 + 终止进程"""
+    if flush and kill_processes:
+        # 完整退出流程
+        report = full_shutdown(include_process_kill=True)
+        return report.to_dict()
+
+    # 部分关闭
+    steps = []
+    if flush:
+        pg_step = flush_redis_to_pg()
+        steps.append(pg_step.to_dict())
+        file_step = flush_redis_to_file()
+        steps.append(file_step.to_dict())
+
+    # 停止后台任务进程
     killed = []
     errors = []
     with _tasks_lock:
@@ -765,26 +830,22 @@ def shutdown_all():
             proc = t["proc"]
             label = t.get("label", "")
             try:
-                # 使用 Popen.terminate() 而非 os.kill，Windows/Linux 均兼容
                 proc.terminate()
                 t["status"] = "stopped"
                 killed.append({"task": label, "pid": proc.pid})
             except Exception as e:
                 errors.append({"task": label, "pid": getattr(proc, "pid", None), "error": str(e)})
-    # 同时尝试终止 SSH 隧道进程
-    try:
-        if sys.platform == "win32":
-            os.system('taskkill /FI "WINDOWTITLE eq SSH-Tunnel*" /F >nul 2>&1')
-        else:
-            os.system("pkill -f 'ssh -N -L' 2>/dev/null || true")
-        killed.append({"task": "SSH隧道", "pid": "all"})
-    except Exception:
-        pass
+
+    if kill_processes:
+        kill_ssh_tunnels()
+        kill_api_server()
+        kill_dynamic_monitor()
 
     return {
         "status": "shutdown",
         "killed": killed,
         "errors": errors,
-        "message": f"已关闭 {len(killed)} 个进程" + (f"，{len(errors)} 个失败" if errors else ""),
+        "steps": steps,
+        "message": f"已关闭 {len(killed)} 个任务" + (f"，{len(errors)} 个失败" if errors else ""),
     }
 

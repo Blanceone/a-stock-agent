@@ -301,3 +301,79 @@ class TestBuildLock:
         from src.nodes.concept_graph_builder import build_full
         result = build_full()
         assert result["status"] == "already_running"
+
+
+# ── 8. 概念股票语义增强 ────────────────────────────────────────────────────────────────
+class TestEnrichConceptStocks:
+    @patch("src.infrastructure.database.chroma_collection", None)
+    def test_chroma_unavailable(self):
+        """ChromaDB 不可用时返回原始数据"""
+        from src.infrastructure.concept_sources import enrich_concept_stocks
+        detail = {"000001.SZ": {"sources": ["akshare_em"], "name": "平安银行"}}
+        result = enrich_concept_stocks("固态电池", detail)
+        assert result == detail
+
+    @patch("src.infrastructure.database.chroma_collection")
+    def test_merge_and_score(self, mock_chroma):
+        """合并 API 股票 + ChromaDB 股票并打分"""
+        mock_chroma.query.return_value = {
+            "ids": [["id1", "id2", "id3"]],
+            "metadatas": [[
+                {"ts_code": "300750.SZ", "name": "宁德时代"},
+                {"ts_code": "000001.SZ", "name": "平安银行"},
+                {"ts_code": "688005.SH", "name": "容百科技"},
+            ]],
+            "distances": [[0.1, 0.8, 0.3]],
+            "documents": [["", "", ""]],
+        }
+        from src.infrastructure.concept_sources import enrich_concept_stocks
+        detail = {
+            "000001.SZ": {"sources": ["akshare_em"], "name": "平安银行"},
+        }
+        result = enrich_concept_stocks("固态电池", detail)
+
+        # 结果应包含 3 只股票（1只原有 + 2只新增）
+        assert len(result) == 3
+
+        # 宁德时代 distance=0.1 → score=90，应排第一
+        keys = list(result.keys())
+        assert keys[0] == "300750.SZ"
+        assert result["300750.SZ"]["semantic_score"] == 90
+        assert "semantic" in result["300750.SZ"]["sources"]
+
+        # 容百科技 distance=0.3 → score=70，应排第二
+        assert keys[1] == "688005.SH"
+        assert result["688005.SH"]["semantic_score"] == 70
+
+        # 平安银行 distance=0.8 → score=20（已在板块，ChromaDB也召回）
+        assert keys[2] == "000001.SZ"
+        assert result["000001.SZ"]["semantic_score"] == 20
+        assert "akshare_em" in result["000001.SZ"]["sources"]  # 保留原来源
+
+    @patch("src.infrastructure.database.chroma_collection")
+    def test_api_stock_not_in_chroma(self, mock_chroma):
+        """API股票未被 ChromaDB 召回时给低分"""
+        mock_chroma.query.return_value = {
+            "ids": [["id1"]],
+            "metadatas": [[{"ts_code": "300750.SZ", "name": "宁德时代"}]],
+            "distances": [[0.15]],
+            "documents": [[""]],
+        }
+        from src.infrastructure.concept_sources import enrich_concept_stocks
+        detail = {
+            "000002.SZ": {"sources": ["akshare_em"], "name": "万科A"},
+        }
+        result = enrich_concept_stocks("固态电池", detail)
+        # 宁德时代 score=85 排第一，万科A score=5 排第二
+        keys = list(result.keys())
+        assert keys[0] == "300750.SZ"
+        assert result["000002.SZ"]["semantic_score"] == 5
+
+    @patch("src.infrastructure.database.chroma_collection")
+    def test_empty_chroma_results(self, mock_chroma):
+        """ChromaDB 返回空结果时返回原始数据"""
+        mock_chroma.query.return_value = {"ids": [[]], "metadatas": [[]], "distances": [[]]}
+        from src.infrastructure.concept_sources import enrich_concept_stocks
+        detail = {"000001.SZ": {"sources": ["akshare_em"], "name": "平安银行"}}
+        result = enrich_concept_stocks("固态电池", detail)
+        assert result == detail

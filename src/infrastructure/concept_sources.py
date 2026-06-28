@@ -382,3 +382,99 @@ def fetch_tushare_concepts(sleep_sec: float = 0.25) -> list[dict]:
             logger.warning("[ConceptSources] tushare 概念获取失败: {}", err_msg)
 
     return results
+
+
+# ── 概念股票语义增强 ────────────────────────────────────────────────────────
+
+def enrich_concept_stocks(
+    concept_name: str,
+    stocks_detail: dict[str, dict],
+    n_results: int = 50,
+) -> dict[str, dict]:
+    """
+    通过 ChromaDB 语义搜索增强概念的股票列表并打分。
+
+    流程：
+      1. 用概念名查询 ChromaDB，获取语义相似的股票
+      2. 将语义搜索发现的股票与已有股票合并
+      3. 按语义相似度为所有股票打分（0-100）
+      4. 按分数降序排列
+
+    Args:
+        concept_name: 概念名称
+        stocks_detail: 已有股票详情 {ts_code: {sources: [...], name: ""}}
+        n_results: ChromaDB 返回结果数
+
+    Returns:
+        增强后的 stocks_detail（按 score 降序，含 semantic_score 字段）
+    """
+    from src.infrastructure import database
+
+    if database.chroma_collection is None:
+        # ChromaDB 不可用，返回原始数据（无打分）
+        return stocks_detail
+
+    # Step 1: ChromaDB 语义搜索
+    try:
+        results = database.chroma_collection.query(
+            query_texts=[concept_name],
+            n_results=n_results,
+        )
+    except Exception as e:
+        logger.debug("[ConceptSources] ChromaDB 查询 '{}' 失败: {}", concept_name, e)
+        return stocks_detail
+
+    if not results or not results.get("ids") or not results["ids"][0]:
+        return stocks_detail
+
+    # Step 2: 解析 ChromaDB 结果 → {ts_code: {name, distance}}
+    chroma_stocks: dict[str, dict] = {}
+    ids_list = results["ids"][0]
+    meta_list = results["metadatas"][0] if results.get("metadatas") else [{}] * len(ids_list)
+    dist_list = results["distances"][0] if results.get("distances") else [1.0] * len(ids_list)
+    for i, doc_id in enumerate(ids_list):
+        meta = meta_list[i]
+        distance = dist_list[i]
+        ts_code = meta.get("ts_code", doc_id)
+        chroma_stocks[ts_code] = {
+            "name": meta.get("name", ""),
+            "distance": distance,
+        }
+
+    # Step 3: 合并已有股票 + ChromaDB 发现的股票
+    merged: dict[str, dict] = {}
+
+    # 3a: 保留已有股票及其来源
+    for ts_code, detail in stocks_detail.items():
+        if ts_code in chroma_stocks:
+            similarity = max(0, 1.0 - chroma_stocks[ts_code]["distance"])
+            score = round(similarity * 100)
+        else:
+            # 已在概念板块但 ChromaDB 未召回，语义距离较远，给低分
+            score = 5
+        merged[ts_code] = {
+            **detail,
+            "semantic_score": score,
+            "name": detail.get("name") or chroma_stocks.get(ts_code, {}).get("name", ""),
+        }
+
+    # 3b: 补充 ChromaDB 发现但概念板块未包含的股票
+    added = 0
+    for ts_code, info in chroma_stocks.items():
+        if ts_code not in merged:
+            similarity = max(0, 1.0 - info["distance"])
+            score = round(similarity * 100)
+            merged[ts_code] = {
+                "sources": ["semantic"],
+                "name": info["name"],
+                "semantic_score": score,
+            }
+            added += 1
+
+    if added > 0:
+        logger.info("[ConceptSources] 语义增强 '{}': 新增 {} 只股票 (共 {} 只)",
+                    concept_name, added, len(merged))
+
+    # Step 4: 按 semantic_score 降序返回
+    sorted_items = sorted(merged.items(), key=lambda x: x[1].get("semantic_score", 0), reverse=True)
+    return dict(sorted_items)

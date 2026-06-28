@@ -172,6 +172,10 @@ def _persist_concept_stocks(redis_client, concept_terms: list[str],
                     stocks_detail[ts_code] = {"sources": [source], "name": name}
 
             concept_sources_set.add(source)
+
+            # 语义增强：ChromaDB 补充股票 + 语义打分
+            from src.infrastructure.concept_sources import enrich_concept_stocks
+            stocks_detail = enrich_concept_stocks(term, stocks_detail)
             stocks_list = list(stocks_detail.keys())
 
             redis_client.hset(
@@ -252,6 +256,10 @@ def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict])
                     stocks_detail[ts_code] = {"sources": [board_source], "name": ""}
 
             concept_sources_set.add(board_source)
+
+            # 语义增强：ChromaDB 补充股票 + 语义打分
+            from src.infrastructure.concept_sources import enrich_concept_stocks
+            stocks_detail = enrich_concept_stocks(concept_name, stocks_detail)
             stocks_list = list(stocks_detail.keys())
 
             payload = {

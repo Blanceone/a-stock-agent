@@ -288,10 +288,19 @@ def call_llm_with_tools(
                 "content": result,
             })
 
-    # 超过 max_rounds 仍未得到最终回答，取最后一次内容
-    logger.warning("[LLM-Tools] 超过 {} 轮工具调用限制", max_rounds)
-    last_content = messages[-1].get("content", "{}")
-    return _parse_json(last_content)
+    # 超过 max_rounds 仍未得到最终回答，强制 LLM 基于已有工具结果给出最终 JSON
+    logger.warning("[LLM-Tools] 超过 {} 轮工具调用限制，强制最终回答", max_rounds)
+    messages.append({"role": "user", "content": "请基于以上搜索结果，立即输出最终 JSON 结果。不要调用任何工具。"})
+    try:
+        resp = client.chat.completions.create(
+            model=model_id, messages=messages, temperature=temperature, max_tokens=max_tokens,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        return _parse_json(content)
+    except Exception as e:
+        logger.error("[LLM-Tools] 强制最终回答失败: {}", e)
+        last_content = messages[-2].get("content", "{}")
+        return _parse_json(last_content)
 
 
 # ── Prompt 模板加载 ────────────────────────────────────────────────────────────

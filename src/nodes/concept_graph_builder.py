@@ -395,9 +395,9 @@ def bfs_expand(
             )
 
             result = call_llm_with_tools(
-                prompt, model="flash",
+                prompt, model="pro",
                 system="你是A股产业链研究专家。使用 web_search 工具搜索，最终仅输出 JSON。",
-                max_rounds=3, max_tokens=2048, use_cache=False,
+                max_rounds=5, max_tokens=2048, use_cache=False,
             )
 
             if not isinstance(result, dict):
@@ -462,9 +462,13 @@ def bfs_expand(
             logger.warning("[ConceptGraph] 扩展失败: {}", err_msg)
             errors.append(err_msg)
 
-        # 标记当前概念已扩展
+        # 标记当前概念已扩展（保留原有 parent_concepts）
+        _existing_raw = redis_client.hget("dynamic:concepts", current) if redis_client else None
+        _existing_data = json.loads(_existing_raw) if _existing_raw else {}
         _write_concept_to_redis(
-            current, depth, [], policy_anchor, expansion_status="expanded",
+            current, depth,
+            _existing_data.get("parent_concepts", []),
+            policy_anchor, expansion_status="expanded",
         )
 
     return {"discovered": discovered, "layers": layer_counts}
@@ -487,7 +491,7 @@ def build_full(
         if lock_val:
             logger.warning("[ConceptGraph] 已有构建任务在运行中")
             return {"status": "already_running", "message": "概念图谱构建已在运行中"}
-        redis_client.setex(REDIS_KEY_GRAPH_BUILD_LOCK, 300, "1")  # 5分钟锁
+        redis_client.setex(REDIS_KEY_GRAPH_BUILD_LOCK, 3600, "1")  # 1小时锁
 
     started_at = datetime.now().isoformat()
     try:

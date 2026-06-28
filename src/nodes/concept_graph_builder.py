@@ -568,6 +568,20 @@ def bfs_expand(
 
 # ── 全量构建入口 ──────────────────────────────────────────────────────────────
 
+def _clear_old_graph() -> None:
+    """清除旧图谱数据，供全量构建前调用"""
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(REDIS_KEY_GRAPH_ROOTS)
+        redis_client.delete(REDIS_KEY_GRAPH_EDGES)
+        for depth in range(settings.concept_graph_max_depth + 2):
+            redis_client.delete(REDIS_KEY_GRAPH_LAYER.format(depth=depth))
+        logger.info("[ConceptGraph] 旧图谱数据已清除")
+    except Exception as e:
+        logger.warning("[ConceptGraph] 清除旧图谱失败: {}", e)
+
+
 def build_full(
     policy_text_path_or_content: str | None = None,
     progress_callback: Callable | None = None,
@@ -587,6 +601,9 @@ def build_full(
 
     started_at = datetime.now().isoformat()
     try:
+        # Step 0: 清除旧图谱数据
+        _clear_old_graph()
+
         # Step 1: 获取政策文本
         _update_progress("fetching_policy", 0, 0, 0, "", [], started_at)
         policy_text = fetch_policy_text(policy_text_path_or_content)

@@ -29,6 +29,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 def run_static(pdf_path: str) -> None:
     """静态产业链图谱构建流水线"""
+    from src.infrastructure.env_check import ensure_env
+    ensure_env(need_pg=True, need_redis=True)
     from src.infrastructure.database import init_all
     init_all()
 
@@ -331,6 +333,8 @@ async def run_dynamic() -> None:
     """动态监控流水线（APScheduler 定时任务）"""
     global _shared_concepts
     import src.infrastructure.database as db
+    from src.infrastructure.env_check import ensure_env
+    ensure_env(need_pg=True, need_redis=True)
     db.init_all()
 
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -561,6 +565,8 @@ async def run_dynamic() -> None:
 
 def run_init() -> None:
     """初始化：建表 + 全A股基础信息入库"""
+    from src.infrastructure.env_check import ensure_env
+    ensure_env(need_pg=True)
     from src.infrastructure.database import init_all, get_pg_conn, release_pg_conn
     from src.infrastructure.data_fetcher import fetch_stock_basic
 
@@ -595,6 +601,8 @@ def run_init() -> None:
 
 def run_semantic() -> None:
     """语义知识库初始化：主营业务文本 → V4-Flash 摘要 → ChromaDB 向量化"""
+    from src.infrastructure.env_check import ensure_env
+    ensure_env(need_pg=True, need_chromadb=True)
     from src.infrastructure.database import init_all
     from src.infrastructure.semantic_init import run as semantic_run
 
@@ -607,6 +615,8 @@ def run_semantic() -> None:
 
 def run_concept_graph(policy_text: str = "") -> None:
     """政策概念图谱构建"""
+    from src.infrastructure.env_check import ensure_env
+    ensure_env(need_pg=True, need_redis=True, need_chromadb=True)
     from src.infrastructure.database import init_all
     init_all()
 

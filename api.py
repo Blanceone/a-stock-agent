@@ -40,7 +40,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
 from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client, ensure_redis, init_all, close_all
-from scripts.preflight_check import run_preflight, auto_fix as preflight_auto_fix
+from src.infrastructure.env_check import ensure_env
 from src.infrastructure.shutdown import (
     full_shutdown, flush_redis_to_pg, flush_redis_to_file,
     stop_background_tasks, kill_ssh_tunnels, kill_api_server, kill_dynamic_monitor,
@@ -51,6 +51,7 @@ from src.infrastructure.shutdown import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动时初始化数据库连接，关闭时释放资源"""
+    ensure_env(need_pg=True, need_redis=True, need_chromadb=True, need_port_8088=True)
     init_all()
     yield
     # 退出前尝试落盘缓存数据
@@ -213,43 +214,6 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-
-# ── Preflight 检查 API ────────────────────────────────────────────────────────
-
-@app.get("/api/preflight")
-def preflight_check(checks: str = Query(None, description="逗号分隔的检查项")):
-    """执行启动前状态检查"""
-    report = run_preflight(checks)
-    return {
-        "all_passed": report.all_passed,
-        "results": [
-            {
-                "name": r.name, "key": r.key,
-                "passed": r.passed, "message": r.message,
-                "fixable": r.fixable, "elapsed_ms": r.elapsed_ms,
-            }
-            for r in report.results
-        ],
-    }
-
-
-@app.post("/api/preflight/fix")
-def preflight_fix(checks: str = Query(None)):
-    """自动修复后重新检查"""
-    report = run_preflight(checks)
-    fixed_report = preflight_auto_fix(report)
-    return {
-        "all_passed": fixed_report.all_passed,
-        "results": [
-            {
-                "name": r.name, "key": r.key,
-                "passed": r.passed, "message": r.message,
-                "fixable": r.fixable, "elapsed_ms": r.elapsed_ms,
-            }
-            for r in fixed_report.results
-        ],
-    }
 
 
 # ── 数据浏览 API ─────────────────────────────────────────────────────────────

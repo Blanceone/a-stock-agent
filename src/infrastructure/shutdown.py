@@ -73,17 +73,14 @@ class ShutdownReport:
 # ── 辅助：安全获取 Redis 客户端 ────────────────────────────────────────────────
 
 def _get_redis():
-    """获取 Redis 客户端，优先用已有连接，否则新建"""
-    try:
-        from src.infrastructure.database import redis_client, ensure_redis
-        r = ensure_redis() if redis_client is None else redis_client
-        return r
-    except Exception:
-        pass
-    # 直连
+    """获取 Redis 客户端，始终新建带 socket_timeout 的连接避免挂起"""
     try:
         import redis as _redis
-        r = _redis.from_url("redis://localhost:6379/0", socket_connect_timeout=3)
+        r = _redis.from_url(
+            "redis://localhost:6379/0",
+            socket_connect_timeout=3,
+            socket_timeout=5,
+        )
         r.ping()
         return r
     except Exception:
@@ -102,14 +99,18 @@ def flush_redis_to_pg() -> StepResult:
         return StepResult("flush_redis_to_pg", True, "Redis 不可达，跳过", 0)
 
     try:
-        # 设置关闭锁，等待进行中的写入完成
-        r.set("system:shutdown_lock", "1", ex=30)
-        time.sleep(2)
+        # 设置关闭锁（带超时的 Redis 连接，不会挂起）
+        try:
+            r.set("system:shutdown_lock", "1", ex=30)
+        except Exception:
+            pass
+        time.sleep(1)
 
         import psycopg2
         conn = psycopg2.connect(
             "postgresql://astock:astock@localhost:5432/astock",
             connect_timeout=5,
+            options="-c statement_timeout=30000",
         )
         cur = conn.cursor()
 
@@ -207,7 +208,10 @@ def flush_redis_to_pg() -> StepResult:
         conn.close()
 
         # 释放关闭锁
-        r.delete("system:shutdown_lock")
+        try:
+            r.delete("system:shutdown_lock")
+        except Exception:
+            pass
 
         ms = int((time.time() - t0) * 1000)
         msg = f"已落盘 {written} 条" + (f"，{len(errors)} 项异常" if errors else "")

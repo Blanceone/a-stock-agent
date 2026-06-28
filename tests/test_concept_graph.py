@@ -100,6 +100,82 @@ class TestMatchExisting:
             cgb.redis_client = orig
 
 
+# ── 2b. 概念池加载 ───────────────────────────────────────────────────────────────
+class TestLoadConceptPool:
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_load_and_sort(self, mock_redis):
+        """加载概念并按 policy_score 降序排列"""
+        mock_redis.hgetall.return_value = {
+            "固态电池": json.dumps({"stocks": ["000001.SZ"], "policy_score": 9, "category": "新能源"}),
+            "低空经济": json.dumps({"stocks": ["000002.SZ"], "policy_score": 7, "category": "高端制造"}),
+            "量子计算": json.dumps({"stocks": ["000003.SZ"], "policy_score": 10, "category": "半导体"}),
+        }
+        from src.nodes.concept_graph_builder import _load_concept_pool
+        pool = _load_concept_pool()
+        assert len(pool) == 3
+        assert pool[0]["name"] == "量子计算"  # score=10 最高
+        assert pool[1]["name"] == "固态电池"  # score=9
+        assert pool[2]["name"] == "低空经济"  # score=7
+
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_exclude_set(self, mock_redis):
+        """排除已加入图谱的概念"""
+        mock_redis.hgetall.return_value = {
+            "固态电池": json.dumps({"stocks": ["000001.SZ"], "policy_score": 9}),
+            "低空经济": json.dumps({"stocks": ["000002.SZ"], "policy_score": 7}),
+        }
+        from src.nodes.concept_graph_builder import _load_concept_pool
+        pool = _load_concept_pool(exclude={"固态电池"})
+        assert len(pool) == 1
+        assert pool[0]["name"] == "低空经济"
+
+    def test_redis_none(self):
+        """Redis 不可用时返回空列表"""
+        import src.nodes.concept_graph_builder as cgb
+        orig = cgb.redis_client
+        cgb.redis_client = None
+        try:
+            from src.nodes.concept_graph_builder import _load_concept_pool
+            assert _load_concept_pool() == []
+        finally:
+            cgb.redis_client = orig
+
+
+# ── 2c. 候选概念粗筛 ───────────────────────────────────────────────────────────────
+class TestFilterCandidates:
+    def test_same_category_first(self):
+        """同类别概念优先"""
+        from src.nodes.concept_graph_builder import _filter_candidates
+        pool = [
+            {"name": "A", "category": "新能源", "policy_score": 5, "stock_count": 10},
+            {"name": "B", "category": "半导体", "policy_score": 9, "stock_count": 20},
+            {"name": "C", "category": "新能源", "policy_score": 3, "stock_count": 5},
+        ]
+        result = _filter_candidates(pool, "新能源", set())
+        # 同类别 A,C 应在前面
+        assert result[0]["name"] == "A"
+        assert result[1]["name"] == "C"
+        assert result[2]["name"] == "B"
+
+    def test_max_candidates_limit(self):
+        """截断到 max_candidates"""
+        from src.nodes.concept_graph_builder import _filter_candidates
+        pool = [{"name": f"C{i}", "category": "", "policy_score": 0, "stock_count": 1} for i in range(100)]
+        result = _filter_candidates(pool, "", set(), max_candidates=10)
+        assert len(result) == 10
+
+    def test_exclude_visited(self):
+        """排除已访问概念"""
+        from src.nodes.concept_graph_builder import _filter_candidates
+        pool = [
+            {"name": "A", "category": "", "policy_score": 5, "stock_count": 10},
+            {"name": "B", "category": "", "policy_score": 3, "stock_count": 5},
+        ]
+        result = _filter_candidates(pool, "", {"A"})
+        assert len(result) == 1
+        assert result[0]["name"] == "B"
+
+
 # ── 3. 进度管理 ──────────────────────────────────────────────────────────────
 class TestProgress:
     @patch("src.nodes.concept_graph_builder.redis_client")

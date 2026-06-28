@@ -6,7 +6,7 @@ concept_graph_builder.py — 政策驱动概念图谱构建引擎
   2. expand_from_concept() — 手动输入单概念展开
   3. incremental_insert()  — 新闻发现新概念时增量插入
 
-核心算法：BFS 迭代扩展 + LLM 智能收敛
+核心算法：BFS 迭代扩展 + LLM 从已有概念池中选取子概念
 """
 from __future__ import annotations
 
@@ -159,6 +159,14 @@ def extract_layer0(policy_text: str) -> list[dict]:
     concepts.sort(key=lambda x: x.get("importance", 0), reverse=True)
     concepts = concepts[:settings.concept_graph_max_layer0]
 
+    # 后置匹配：将 LLM 提取的概念名对齐到已有概念池
+    for c in concepts:
+        matched = _match_existing_concept(c["concept"])
+        if matched and matched != c["concept"]:
+            logger.debug("[ConceptGraph] Layer0 '{}' 匹配到已有概念 '{}'", c["concept"], matched)
+            c["original_concept"] = c["concept"]
+            c["concept"] = matched
+
     logger.info("[ConceptGraph] Layer0 提取: {} 个核心概念", len(concepts))
     for c in concepts:
         logger.debug("  - {} (重要度: {}, 分类: {})", c["concept"], c.get("importance"), c.get("category"))
@@ -210,6 +218,69 @@ def _get_visited_set() -> set[str]:
     except Exception:
         pass
     return visited
+
+
+def _load_concept_pool(exclude: set[str] | None = None) -> list[dict]:
+    """
+    从 Redis dynamic:concepts 加载候选概念池。
+    返回: [{"name", "category", "policy_score", "stock_count"}, ...]
+    按 policy_score 降序，排除已加入图谱的概念。
+    """
+    if redis_client is None:
+        return []
+    try:
+        all_data = redis_client.hgetall("dynamic:concepts")
+    except Exception:
+        return []
+
+    exclude = exclude or set()
+    pool = []
+    for name_raw, val_raw in all_data.items():
+        name = name_raw.decode("utf-8") if isinstance(name_raw, bytes) else name_raw
+        if name in exclude:
+            continue
+        try:
+            data = json.loads(val_raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        stock_count = len(data.get("stocks", []))
+        pool.append({
+            "name": name,
+            "category": data.get("category", ""),
+            "policy_score": data.get("policy_score", 0),
+            "stock_count": stock_count,
+        })
+
+    pool.sort(key=lambda x: x.get("policy_score", 0), reverse=True)
+    return pool
+
+
+def _filter_candidates(
+    pool: list[dict],
+    current_category: str,
+    visited: set[str],
+    max_candidates: int = 80,
+) -> list[dict]:
+    """
+    根据当前概念分类粗筛候选池，减少 LLM token 消耗。
+    策略：同类别概念优先 + 高分概念兜底，总数不超过 max_candidates。
+    """
+    same_cat = []
+    other_cat = []
+    for item in pool:
+        if item["name"] in visited:
+            continue
+        if current_category and item.get("category") == current_category:
+            same_cat.append(item)
+        else:
+            other_cat.append(item)
+
+    candidates = same_cat[:]
+    remaining = max_candidates - len(candidates)
+    if remaining > 0:
+        candidates.extend(other_cat[:remaining])
+
+    return candidates
 
 
 def _write_concept_to_redis(
@@ -361,6 +432,10 @@ def bfs_expand(
     layer_counts[0] = len(layer0_concepts)
     total_layer0 = len(layer0_concepts)
 
+    # 加载候选概念池（一次性）
+    concept_pool = _load_concept_pool(exclude=visited)
+    logger.info("[ConceptGraph] 候选概念池加载: {} 个概念", len(concept_pool))
+
     _update_progress("running", 0, discovered, total_layer0, "", errors, started_at)
 
     # BFS 主循环
@@ -381,23 +456,28 @@ def bfs_expand(
         logger.info("[ConceptGraph] BFS Layer{} 扩展: {}", depth, current)
 
         # 限流等待
-        time.sleep(3)
+        time.sleep(1)
 
-        # LLM 扩展
+        # LLM 从候选池中选取子概念
         try:
             expand_template = load_prompt("concept_graph_expand")
-            excluded = ", ".join(list(visited)[:30])  # 最近30个已访问概念
+            candidates = _filter_candidates(concept_pool, category, visited, max_candidates=80)
+            candidate_text = "\n".join(
+                f"- {c['name']}（{c.get('category', '其他')}，{c.get('stock_count', 0)}只成分股）"
+                for c in candidates
+            )
+            excluded = ", ".join(list(visited)[:30])
             prompt = expand_template.format(
                 concept_name=current,
                 category=category or "综合",
                 policy_anchor=policy_anchor or "国家产业政策",
+                candidate_pool=candidate_text or "（候选池为空）",
                 excluded_concepts=excluded,
             )
 
-            result = call_llm_with_tools(
+            result = call_llm_json(
                 prompt, model="pro",
-                system="你是A股产业链研究专家。使用 web_search 工具搜索，最终仅输出 JSON。",
-                max_rounds=5, max_tokens=2048, use_cache=False,
+                max_tokens=2048, use_cache=False,
             )
 
             if not isinstance(result, dict):
@@ -411,6 +491,9 @@ def bfs_expand(
             children = children[:max_children]
             logger.info("[ConceptGraph] {} 发现 {} 个子概念", current, len(children))
 
+            # 构建候选名称集合（用于硬校验）
+            pool_names = {c["name"] for c in candidates}
+
             # 处理每个子概念
             for child in children:
                 if not isinstance(child, dict):
@@ -418,6 +501,15 @@ def bfs_expand(
                 child_name = child.get("concept", "").strip()
                 if not child_name or child_name in visited:
                     continue
+
+                # 硬校验：确保概念在候选池中
+                if child_name not in pool_names:
+                    fuzzy = _match_existing_concept(child_name)
+                    if fuzzy and fuzzy in pool_names:
+                        child_name = fuzzy
+                    else:
+                        logger.debug("[ConceptGraph] LLM 返回池外概念 '{}'，跳过", child_name)
+                        continue
 
                 relevance = float(child.get("relevance", 0))
                 relation = child.get("relation", "")
@@ -427,24 +519,23 @@ def bfs_expand(
                 should_expand = relevance >= threshold
 
                 if should_expand:
-                    # 匹配已有概念池
-                    existing_match = _match_existing_concept(child_name)
-                    use_name = existing_match if existing_match else child_name
-
                     # 写入概念 + 边
                     _write_concept_to_redis(
-                        use_name, depth=depth + 1,
+                        child_name, depth=depth + 1,
                         parent_concepts=[current],
                         policy_anchor=policy_anchor,
                         expansion_status="pending",
                     )
-                    _write_edge(use_name, current, relevance, relation)
+                    _write_edge(child_name, current, relevance, relation)
+
+                    # 从候选池移除（避免重复分配）
+                    concept_pool = [c for c in concept_pool if c["name"] != child_name]
 
                     # 入队继续扩展
-                    visited.add(use_name)
+                    visited.add(child_name)
                     discovered += 1
                     layer_counts[depth + 1] = layer_counts.get(depth + 1, 0) + 1
-                    queue.append((use_name, depth + 1, category, policy_anchor))
+                    queue.append((child_name, depth + 1, category, policy_anchor))
                 else:
                     # 低关联度：记录但不扩展
                     _write_concept_to_redis(
@@ -456,6 +547,7 @@ def bfs_expand(
                     _write_edge(child_name, current, relevance, relation)
                     visited.add(child_name)
                     discovered += 1
+                    concept_pool = [c for c in concept_pool if c["name"] != child_name]
 
         except Exception as e:
             err_msg = f"{current}: {e}"

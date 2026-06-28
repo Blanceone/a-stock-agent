@@ -4,29 +4,25 @@
 所属产业分类：{category}
 该概念的政策背景：{policy_anchor}
 
-请使用 web_search 工具搜索与该概念直接相关的细分产业方向、上下游环节和技术路线。
+以下是当前A股概念板块池中的候选概念（含分类和成分股数量）：
+{candidate_pool}
 
-搜索策略建议：
-1. 搜索「{concept_name} 产业链 细分方向」
-2. 搜索「{concept_name} 上下游 A股 概念」
-3. 搜索「{concept_name} 技术路线 分类」
+请从上述候选列表中，选取3-8个与「{concept_name}」直接关联的子概念。
 
-从搜索结果中，发现3-8个与「{concept_name}」直接关联的子概念。
-
-子概念标准：
-- 必须是「{concept_name}」的细分方向或直接上下游（不是平行概念）
-- 必须是A股可投资的具体方向
+选取标准：
+- 必须是「{concept_name}」的细分方向、直接上下游或技术路线（不是平行概念）
+- 优先选择成分股数量较大的概念（意味着市场认可度高）
+- 只能从候选列表中选取，绝对不要自创概念名称
 - relevance: 与父概念的相关性 0.0-1.0
 - relation: 关系类型（上游/下游/细分方向/技术路线/应用场景）
 
-已排除的概念（不要重复）：
+已排除的概念（不要重复选取）：
 {excluded_concepts}
 
 输出 JSON：
 {{
   "parent": "{concept_name}",
   "children": [
-    {{"concept": "硫化物电解质", "relevance": 0.92, "relation": "上游材料", "reason": "固态电池核心原材料"}}
-  ],
-  "search_queries_used": ["固态电池 产业链 细分方向"]
+    {{"concept": "固态电池", "relevance": 0.92, "relation": "细分方向", "reason": "新能源储能核心方向"}}
+  ]
 }}

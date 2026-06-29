@@ -234,7 +234,7 @@ def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict])
         concept_name = board.get("concept", "")
         stocks = board.get("stocks", [])
         board_source = board.get("source", source)
-        if not concept_name or not stocks:
+        if not concept_name:
             continue
         try:
             existing_raw = redis_client.hget("dynamic:concepts", concept_name)
@@ -261,6 +261,9 @@ def sync_concepts_to_redis(redis_client, source: str, concepts_data: list[dict])
             from src.infrastructure.concept_sources import enrich_concept_stocks
             stocks_detail = enrich_concept_stocks(concept_name, stocks_detail)
             stocks_list = list(stocks_detail.keys())
+
+            if not stocks_list:
+                continue  # API 和 ChromaDB 都没找到股票，跳过
 
             payload = {
                 "stocks": stocks_list,

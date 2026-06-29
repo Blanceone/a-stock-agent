@@ -208,22 +208,25 @@ def _fallback_filter(concept_names: list[str], max_boards: int = 150) -> list[st
 # ── 成分股获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_concept_stocks(board_name: str, sleep_sec: float = 0.3) -> list[str]:
-    """获取单个概念板块的成分股列表（ts_code 格式）"""
-    try:
-        import akshare as ak
-        df_cons = ak.stock_board_concept_cons_em(symbol=board_name)
-        if df_cons is None or df_cons.empty:
-            return []
-
-        stocks = []
-        for _, row in df_cons.iterrows():
-            code = str(row.get("代码", "")).strip()
-            if code:
-                stocks.append(_em_code_to_ts_code(code))
-        return stocks
-    except Exception as e:
-        logger.warning("[ConceptSources] akshare 板块 '{}' 成分股失败: {}", board_name, e)
-        return []
+    """获取单个概念板块的成分股列表（ts_code 格式），含 3 次重试"""
+    import akshare as ak
+    for attempt in range(3):
+        try:
+            df_cons = ak.stock_board_concept_cons_em(symbol=board_name)
+            if df_cons is None or df_cons.empty:
+                return []
+            stocks = []
+            for _, row in df_cons.iterrows():
+                code = str(row.get("代码", "")).strip()
+                if code:
+                    stocks.append(_em_code_to_ts_code(code))
+            return stocks
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(0.5 * (2 ** attempt))
+            else:
+                logger.warning("[ConceptSources] akshare 板块 '{}' 成分股失败(重试{}次): {}", board_name, attempt + 1, e)
+    return []
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
@@ -291,7 +294,7 @@ def fetch_akshare_concepts(
     results = []
     total = len(selected_concepts)
     for idx, (name, score, category) in enumerate(selected_concepts, 1):
-        stocks = fetch_concept_stocks(name, sleep_sec=0)
+        stocks = fetch_concept_stocks(name, sleep_sec=sleep_sec)
         if stocks:
             results.append({
                 "concept": name,

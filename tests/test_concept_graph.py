@@ -377,3 +377,76 @@ class TestEnrichConceptStocks:
         detail = {"000001.SZ": {"sources": ["akshare_em"], "name": "平安银行"}}
         result = enrich_concept_stocks("固态电池", detail)
         assert result == detail
+
+
+# ── 12. fetch_concept_stocks 重试 ─────────────────────────────────────────────
+class TestFetchConceptStocks:
+    @patch("src.infrastructure.concept_sources.time.sleep")
+    @patch("src.infrastructure.concept_sources._em_code_to_ts_code", side_effect=lambda x: f"{x}.SZ")
+    def test_retry_succeeds_on_third_attempt(self, mock_code, mock_sleep):
+        """前2次失败第3次成功，应返回结果"""
+        import pandas as pd
+        from src.infrastructure.concept_sources import fetch_concept_stocks
+        with patch("akshare.stock_board_concept_cons_em",
+                   side_effect=[
+                       Exception("Connection aborted"),
+                       Exception("RemoteDisconnected"),
+                       pd.DataFrame({"代码": ["000001", "300750"]}),
+                   ]):
+            result = fetch_concept_stocks("固态电池")
+        assert result == ["000001.SZ", "300750.SZ"]
+        assert mock_sleep.call_count == 2  # 重试2次
+
+    @patch("src.infrastructure.concept_sources.time.sleep")
+    def test_all_retries_fail(self, mock_sleep):
+        """3次全失败应返回空列表"""
+        from src.infrastructure.concept_sources import fetch_concept_stocks
+        with patch("akshare.stock_board_concept_cons_em",
+                   side_effect=Exception("Connection aborted")):
+            result = fetch_concept_stocks("固态电池")
+        assert result == []
+        assert mock_sleep.call_count == 2  # 前2次重试，第3次不sleep
+
+
+# ── 13. sync_concepts_to_redis 语义增强覆盖 ───────────────────────────────────
+class TestSyncConceptsEnrichFallback:
+    @patch("src.infrastructure.database.chroma_collection")
+    def test_empty_stocks_still_enriched(self, mock_chroma):
+        """akshare 返回空股票时，ChromaDB 语义增强仍执行"""
+        mock_chroma.query.return_value = {
+            "ids": [["id1", "id2"]],
+            "metadatas": [[
+                {"ts_code": "300750.SZ", "name": "宁德时代"},
+                {"ts_code": "000001.SZ", "name": "平安银行"},
+            ]],
+            "distances": [[0.1, 0.3]],
+            "documents": [["", ""]],
+        }
+        mock_redis = MagicMock()
+        mock_redis.hget.return_value = None
+
+        from main import sync_concepts_to_redis
+        concepts = [{"concept": "固态电池", "stocks": [], "source": "akshare_em", "score": 8, "category": "新能源"}]
+        sync_concepts_to_redis(mock_redis, "akshare_em", concepts)
+
+        # 应调用 hset 写入 Redis（ChromaDB 补充了2只股票）
+        mock_redis.hset.assert_called_once()
+        call_args = mock_redis.hset.call_args
+        assert call_args[0][0] == "dynamic:concepts"
+        assert call_args[0][1] == "固态电池"
+        payload = json.loads(call_args[0][2])
+        assert len(payload["stocks"]) == 2
+        assert "300750.SZ" in payload["stocks"]
+
+    def test_both_empty_skip(self):
+        """API 和 ChromaDB 都没找到股票时跳过"""
+        mock_redis = MagicMock()
+        mock_redis.hget.return_value = None
+
+        from main import sync_concepts_to_redis
+        concepts = [{"concept": "固态电池", "stocks": [], "source": "akshare_em", "score": 8, "category": "新能源"}]
+        with patch("src.infrastructure.database.chroma_collection", None):
+            sync_concepts_to_redis(mock_redis, "akshare_em", concepts)
+
+        # 不应写入
+        mock_redis.hset.assert_not_called()

@@ -279,6 +279,8 @@ async function renderOverview() {
   html += `<div class="action-btn" onclick="triggerTask('semantic')" data-task="semantic"><div class="action-icon">&#9782;</div><div class="action-label">语义初始化</div><div class="action-desc">主营业务向量化入库 ChromaDB</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('static')" data-task="static"><div class="action-icon">&#9733;</div><div class="action-label">静态图谱构建</div><div class="action-desc">产业链分析 + 选股评分</div></div>`;
   html += `<div class="action-btn" onclick="triggerTask('dynamic')" data-task="dynamic"><div class="action-icon">&#9888;</div><div class="action-label">动态监控</div><div class="action-desc">RSS轮询 + 三共振预警</div></div>`;
+  html += `<div class="action-btn" onclick="refreshConcepts('list')"><div class="action-icon">&#8635;</div><div class="action-label">刷新概念列表</div><div class="action-desc">从东财接口同步概念板块</div></div>`;
+  html += `<div class="action-btn" onclick="refreshConcepts('stocks')"><div class="action-icon">&#8634;</div><div class="action-label">刷新概念股票</div><div class="action-desc">重新获取所有概念成分股</div></div>`;
   html += `<div class="action-btn" onclick="shutdownAll()" style="border-color:var(--red);opacity:0.85"><div class="action-icon" style="color:var(--red)">&#9211;</div><div class="action-label" style="color:var(--red)">安全关闭</div><div class="action-desc">落盘缓存 + 停止所有后台任务</div></div>`;
   html += '</div>';
   html += '<div class="task-list" id="taskList"></div>';
@@ -319,6 +321,25 @@ async function shutdownAll() {
   } catch(e) {
     if (statusEl) statusEl.innerHTML = `<div class="task-item"><div class="task-header"><span class="task-name">关闭失败</span><span class="task-status failed">失败</span></div><div class="task-log">${escHtml(e.message)}</div></div>`;
     else alert('关闭请求失败: ' + e.message);
+  }
+}
+
+async function refreshConcepts(type) {
+  const label = type === 'list' ? '概念列表' : '概念股票';
+  const url = type === 'list' ? '/api/concepts/refresh-list' : '/api/concepts/refresh-stocks';
+  if (!confirm(`确定要刷新${label}吗？\n\n将在后台重新获取数据，可能需要几分钟。`)) return;
+  const statusEl = document.querySelector('.task-list');
+  try {
+    if (statusEl) {
+      const prev = statusEl.innerHTML;
+      statusEl.innerHTML = `<div class="task-item"><div class="task-header"><span class="task-name">正在刷新${label}...</span><span class="task-status running">执行中</span></div><div class="task-log">正在后台获取数据...</div></div>` + prev;
+    }
+    const r = await fetch(url, {method:'POST'});
+    const d = await r.json();
+    if (d.status === 'already_running') { alert(d.message); return; }
+    alert(d.message || `${label}刷新已启动`);
+  } catch(e) {
+    alert('刷新请求失败: ' + e.message);
   }
 }
 

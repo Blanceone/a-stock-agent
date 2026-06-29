@@ -570,3 +570,63 @@ def _web_search_stocks(concept_name: str) -> dict[str, dict]:
         detail[ts_code] = {"sources": ["web_search"], "name": name}
 
     return detail
+
+
+# ── 批量刷新概念股票 ──────────────────────────────────────────────────────────
+
+def refresh_all_concept_stocks(redis_client, sleep_sec: float = 0.3) -> dict:
+    """
+    批量刷新所有概念的成分股列表。
+
+    流程：遍历 dynamic:concepts → 逐一调用 find_stocks_for_concept → 更新 Redis
+
+    Returns:
+        {"total": int, "updated": int, "failed": int, "skipped": int}
+    """
+    if redis_client is None:
+        return {"total": 0, "updated": 0, "failed": 0, "skipped": 0}
+
+    try:
+        all_concepts = redis_client.hgetall("dynamic:concepts")
+    except Exception as e:
+        logger.warning("[ConceptSources] 读取 dynamic:concepts 失败: {}", e)
+        return {"total": 0, "updated": 0, "failed": 1, "skipped": 0}
+
+    total = len(all_concepts)
+    updated = 0
+    failed = 0
+    skipped = 0
+
+    for idx, (name_raw, val_raw) in enumerate(all_concepts.items(), 1):
+        concept_name = name_raw.decode("utf-8") if isinstance(name_raw, bytes) else name_raw
+        try:
+            data = json.loads(val_raw)
+        except (json.JSONDecodeError, TypeError):
+            skipped += 1
+            continue
+
+        try:
+            enriched = find_stocks_for_concept(concept_name)
+            if enriched:
+                data["stocks"] = list(enriched.keys())
+                data["stocks_detail"] = enriched
+                redis_client.hset(
+                    "dynamic:concepts", concept_name,
+                    json.dumps(data, ensure_ascii=False),
+                )
+                updated += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            logger.debug("[ConceptSources] 刷新 '{}' 失败: {}", concept_name, e)
+            failed += 1
+
+        if idx % 10 == 0:
+            logger.info("[ConceptSources] 股票刷新进度 {}/{}", idx, total)
+
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+    logger.info("[ConceptSources] 股票刷新完成: 共{}个, 更新{}个, 跳过{}个, 失败{}个",
+                total, updated, skipped, failed)
+    return {"total": total, "updated": updated, "skipped": skipped, "failed": failed}

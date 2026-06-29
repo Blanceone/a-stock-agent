@@ -589,6 +589,65 @@ def concept_detail(concept_name: str):
         return {"error": str(e), "redis": True}
 
 
+# ── 概念手动刷新 API ─────────────────────────────────────────────────────────
+
+_concept_refresh_lock = threading.Lock()
+
+
+@app.post("/api/concepts/refresh-list")
+def concepts_refresh_list():
+    """手动触发概念列表同步（后台线程）"""
+    import src.infrastructure.database as db
+    from main import concept_sync_job
+
+    if not _concept_refresh_lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "概念列表刷新正在运行中"}
+
+    def _bg_refresh():
+        try:
+            if db.pg_pool is None:
+                db.init_all()
+            import asyncio
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(concept_sync_job())
+            loop.close()
+        except Exception as e:
+            logger.error("[API] 概念列表刷新异常: {}", e)
+        finally:
+            _concept_refresh_lock.release()
+
+    t = threading.Thread(target=_bg_refresh, daemon=True)
+    t.start()
+    return {"status": "started", "message": "概念列表刷新已启动（后台运行）"}
+
+
+@app.post("/api/concepts/refresh-stocks")
+def concepts_refresh_stocks():
+    """手动刷新所有概念的成分股列表（后台线程）"""
+    import src.infrastructure.database as db
+
+    if db.redis_client is None:
+        raise HTTPException(503, "Redis 未连接")
+
+    # 简单并发锁
+    if not _concept_refresh_lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "概念股票刷新正在运行中"}
+
+    def _bg_refresh():
+        try:
+            from src.infrastructure.concept_sources import refresh_all_concept_stocks
+            result = refresh_all_concept_stocks(db.redis_client)
+            logger.info("[API] 概念股票刷新完成: {}", result)
+        except Exception as e:
+            logger.error("[API] 概念股票刷新异常: {}", e)
+        finally:
+            _concept_refresh_lock.release()
+
+    t = threading.Thread(target=_bg_refresh, daemon=True)
+    t.start()
+    return {"status": "started", "message": "概念股票刷新已启动（后台运行）"}
+
+
 # ── 概念图谱 API ──────────────────────────────────────────────────────────────
 
 @app.post("/api/concept-graph/build")

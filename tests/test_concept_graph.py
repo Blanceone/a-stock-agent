@@ -140,6 +140,20 @@ class TestLoadConceptPool:
         finally:
             cgb.redis_client = orig
 
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_skip_zero_stock_concepts(self, mock_redis):
+        """无成分股的概念应被排除"""
+        mock_redis.hgetall.return_value = {
+            "固态电池": json.dumps({"stocks": ["000001.SZ"], "policy_score": 9}),
+            "金刚石半导体": json.dumps({"stocks": [], "policy_score": 8}),
+            "低空经济": json.dumps({"stocks": ["000002.SZ"], "policy_score": 7}),
+        }
+        from src.nodes.concept_graph_builder import _load_concept_pool
+        pool = _load_concept_pool()
+        names = [c["name"] for c in pool]
+        assert "金刚石半导体" not in names
+        assert len(pool) == 2
+
 
 # ── 2c. 候选概念粗筛 ───────────────────────────────────────────────────────────────
 class TestFilterCandidates:
@@ -201,8 +215,11 @@ class TestProgress:
 class TestRedisWrite:
     @patch("src.nodes.concept_graph_builder.redis_client")
     def test_write_concept(self, mock_redis):
-        """概念写入 dynamic:concepts + layer Set"""
-        mock_redis.hget.return_value = None
+        """概念写入 dynamic:concepts + layer Set（有成分股时）"""
+        # 模拟已有概念带成分股
+        mock_redis.hget.return_value = json.dumps({
+            "stocks": ["300750.SZ"], "stocks_detail": {}, "sources": ["akshare_em"],
+        })
 
         calls = {}
         mock_redis.hset = lambda h, k, v: calls.setdefault("hset", []).append((h, k, v))
@@ -222,6 +239,28 @@ class TestRedisWrite:
         assert data["parent_concepts"] == ["新能源"]
 
         assert "sadd" in calls
+
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_write_concept_no_stocks_skip_layer(self, mock_redis):
+        """无成分股概念不加入 layer Set"""
+        # 模拟无成分股的已有概念
+        mock_redis.hget.return_value = json.dumps({
+            "stocks": [], "stocks_detail": {}, "sources": ["llm"],
+        })
+
+        calls = {}
+        mock_redis.hset = lambda h, k, v: calls.setdefault("hset", []).append((h, k, v))
+        mock_redis.sadd = lambda s, v: calls.setdefault("sadd", []).append((s, v))
+        mock_redis.expire = lambda k, t: None
+
+        from src.nodes.concept_graph_builder import _write_concept_to_redis
+        _write_concept_to_redis("金刚石半导体", depth=2, parent_concepts=["新材料"],
+                                policy_anchor="测试", expansion_status="pending")
+
+        # hset 应写入（保留元数据）
+        assert "hset" in calls
+        # 但 sadd 不应调用（无成分股不入 layer）
+        assert "sadd" not in calls
 
     @patch("src.nodes.concept_graph_builder.redis_client")
     def test_write_edge(self, mock_redis):

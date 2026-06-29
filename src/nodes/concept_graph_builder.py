@@ -244,6 +244,8 @@ def _load_concept_pool(exclude: set[str] | None = None) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             continue
         stock_count = len(data.get("stocks", []))
+        if stock_count == 0:
+            continue  # 无成分股的概念不入图谱
         pool.append({
             "name": name,
             "category": data.get("category", ""),
@@ -313,10 +315,11 @@ def _write_concept_to_redis(
 
         redis_client.hset("dynamic:concepts", concept_name, json.dumps(data, ensure_ascii=False))
 
-        # 写入 layer Set
-        layer_key = REDIS_KEY_GRAPH_LAYER.format(depth=depth)
-        redis_client.sadd(layer_key, concept_name)
-        redis_client.expire(layer_key, 30 * 86400)
+        # 写入 layer Set（仅当概念有成分股时）
+        if data.get("stocks"):
+            layer_key = REDIS_KEY_GRAPH_LAYER.format(depth=depth)
+            redis_client.sadd(layer_key, concept_name)
+            redis_client.expire(layer_key, 30 * 86400)
 
     except Exception as e:
         logger.debug("[ConceptGraph] 写入概念 {} 失败: {}", concept_name, e)

@@ -481,3 +481,92 @@ def enrich_concept_stocks(
     # Step 4: 按 semantic_score 降序返回
     sorted_items = sorted(merged.items(), key=lambda x: x[1].get("semantic_score", 0), reverse=True)
     return dict(sorted_items)
+
+
+# ── 三重来源成分股查找 ───────────────────────────────────────────────────────
+
+def find_stocks_for_concept(concept_name: str) -> dict[str, dict]:
+    """
+    三重来源逐级兜底为概念查找成分股。
+
+    Tier 1: akshare API（东财板块成分股，含重试）
+    Tier 2: ChromaDB 语义搜索
+    Tier 3: Web 搜索 + LLM 分析
+
+    Returns:
+        stocks_detail: {ts_code: {sources: [...], name: "", ...}}
+        空 dict 表示三重来源均未找到股票
+    """
+    # Tier 1: akshare API
+    stocks = fetch_concept_stocks(concept_name)
+    if stocks:
+        detail = {code: {"sources": ["akshare_em"], "name": ""} for code in stocks}
+        # 叠加 ChromaDB 语义打分
+        detail = enrich_concept_stocks(concept_name, detail)
+        logger.info("[ConceptSources] '{}' Tier1(akshare) 找到 {} 只股票", concept_name, len(detail))
+        return detail
+
+    # Tier 2: ChromaDB 语义搜索
+    detail = enrich_concept_stocks(concept_name, {})
+    if detail:
+        logger.info("[ConceptSources] '{}' Tier2(ChromaDB) 找到 {} 只股票", concept_name, len(detail))
+        return detail
+
+    # Tier 3: Web 搜索 + LLM
+    detail = _web_search_stocks(concept_name)
+    if detail:
+        logger.info("[ConceptSources] '{}' Tier3(web+LLM) 找到 {} 只股票", concept_name, len(detail))
+        return detail
+
+    logger.warning("[ConceptSources] '{}' 三重来源均未找到股票", concept_name)
+    return {}
+
+
+def _web_search_stocks(concept_name: str) -> dict[str, dict]:
+    """通过 web_search + LLM 为概念查找 A 股相关股票"""
+    try:
+        from src.nodes.llm_utils import call_llm_with_tools
+    except Exception:
+        return {}
+
+    prompt = (
+        f"搜索A股市场与'{concept_name}'概念相关的上市公司股票。\n"
+        f"要求：\n"
+        f"1. 先用 web_search 搜索'{concept_name} A股 成分股 概念股'，再搜索'{concept_name} 龙头股票'\n"
+        f"2. 从搜索结果中提取相关A股股票\n"
+        f"3. 输出最多 20 只最相关的股票\n\n"
+        f"输出 JSON 格式（不要调用其他工具）：\n"
+        f'{{"stocks": [{{"code": "000001", "name": "平安银行"}}, ...]}}'
+    )
+
+    try:
+        result = call_llm_with_tools(
+            prompt,
+            model="pro",
+            max_rounds=3,
+            system="你是A股概念板块分析专家。使用 web_search 搜索与概念相关的A股股票，最终输出 JSON。",
+            use_cache=False,
+        )
+    except Exception as e:
+        logger.debug("[ConceptSources] '{}' web_search 失败: {}", concept_name, e)
+        return {}
+
+    if not isinstance(result, dict):
+        return {}
+
+    stocks_list = result.get("stocks", [])
+    if not isinstance(stocks_list, list):
+        return {}
+
+    detail: dict[str, dict] = {}
+    for item in stocks_list:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not code or not code.isdigit():
+            continue
+        ts_code = _em_code_to_ts_code(code)
+        detail[ts_code] = {"sources": ["web_search"], "name": name}
+
+    return detail

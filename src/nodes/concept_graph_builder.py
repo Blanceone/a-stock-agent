@@ -244,8 +244,6 @@ def _load_concept_pool(exclude: set[str] | None = None) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             continue
         stock_count = len(data.get("stocks", []))
-        if stock_count == 0:
-            continue  # 无成分股的概念不入图谱
         pool.append({
             "name": name,
             "category": data.get("category", ""),
@@ -292,7 +290,11 @@ def _write_concept_to_redis(
     policy_anchor: str = "",
     expansion_status: str = "pending",
 ) -> None:
-    """将概念写入 dynamic:concepts Hash（兼容现有结构）"""
+    """将概念写入 dynamic:concepts Hash（兼容现有结构）
+
+    如果概念无成分股，自动触发三重来源补股（API → ChromaDB → Web+LLM）。
+    仅当最终有成分股时才加入图谱 layer Set。
+    """
     if redis_client is None:
         return
     try:
@@ -307,6 +309,19 @@ def _write_concept_to_redis(
                 "confidence": 0.8,
                 "last_seen": datetime.now().isoformat(),
             }
+
+        # 无成分股时自动触发三重来源补股
+        if not data.get("stocks"):
+            try:
+                from src.infrastructure.concept_sources import find_stocks_for_concept
+                enriched = find_stocks_for_concept(concept_name)
+                if enriched:
+                    data["stocks"] = list(enriched.keys())
+                    data["stocks_detail"] = enriched
+                    if "concept_graph" not in data.get("sources", []):
+                        data.setdefault("sources", []).append("concept_graph")
+            except Exception as e:
+                logger.debug("[ConceptGraph] '{}' 补股失败: {}", concept_name, e)
 
         data["graph_depth"] = depth
         data["parent_concepts"] = parent_concepts

@@ -141,8 +141,8 @@ class TestLoadConceptPool:
             cgb.redis_client = orig
 
     @patch("src.nodes.concept_graph_builder.redis_client")
-    def test_skip_zero_stock_concepts(self, mock_redis):
-        """无成分股的概念应被排除"""
+    def test_zero_stock_concepts_included(self, mock_redis):
+        """零股票概念仍加载入池（由后续补股机制处理）"""
         mock_redis.hgetall.return_value = {
             "固态电池": json.dumps({"stocks": ["000001.SZ"], "policy_score": 9}),
             "金刚石半导体": json.dumps({"stocks": [], "policy_score": 8}),
@@ -151,8 +151,8 @@ class TestLoadConceptPool:
         from src.nodes.concept_graph_builder import _load_concept_pool
         pool = _load_concept_pool()
         names = [c["name"] for c in pool]
-        assert "金刚石半导体" not in names
-        assert len(pool) == 2
+        assert "金刚石半导体" in names
+        assert len(pool) == 3
 
 
 # ── 2c. 候选概念粗筛 ───────────────────────────────────────────────────────────────
@@ -240,9 +240,10 @@ class TestRedisWrite:
 
         assert "sadd" in calls
 
+    @patch("src.infrastructure.concept_sources.find_stocks_for_concept", return_value={})
     @patch("src.nodes.concept_graph_builder.redis_client")
-    def test_write_concept_no_stocks_skip_layer(self, mock_redis):
-        """无成分股概念不加入 layer Set"""
+    def test_write_concept_no_stocks_skip_layer(self, mock_redis, mock_enrich):
+        """三重来源均未找到股票时不加入 layer Set"""
         # 模拟无成分股的已有概念
         mock_redis.hget.return_value = json.dumps({
             "stocks": [], "stocks_detail": {}, "sources": ["llm"],
@@ -489,3 +490,108 @@ class TestSyncConceptsEnrichFallback:
 
         # 不应写入
         mock_redis.hset.assert_not_called()
+
+
+# ── 14. 三重来源补股 ─────────────────────────────────────────────────────────
+class TestFindStocksForConcept:
+    @patch("src.infrastructure.concept_sources.enrich_concept_stocks", return_value={})
+    @patch("src.infrastructure.concept_sources.fetch_concept_stocks")
+    def test_tier1_akshare(self, mock_fetch, mock_enrich):
+        """Tier1: akshare 成功则直接返回"""
+        mock_fetch.return_value = ["000001.SZ", "300750.SZ"]
+        mock_enrich.return_value = {
+            "000001.SZ": {"sources": ["akshare_em"], "name": "", "semantic_score": 50},
+            "300750.SZ": {"sources": ["akshare_em", "semantic"], "name": "宁德时代", "semantic_score": 90},
+        }
+        from src.infrastructure.concept_sources import find_stocks_for_concept
+        result = find_stocks_for_concept("金刚石半导体")
+        assert len(result) == 2
+        assert "300750.SZ" in result
+
+    @patch("src.infrastructure.concept_sources._web_search_stocks", return_value={})
+    @patch("src.infrastructure.database.chroma_collection")
+    @patch("src.infrastructure.concept_sources.fetch_concept_stocks", return_value=[])
+    def test_tier2_chromadb(self, mock_fetch, mock_chroma, mock_web):
+        """Tier2: akshare 失败时走 ChromaDB"""
+        mock_chroma.query.return_value = {
+            "ids": [["id1"]],
+            "metadatas": [[{"ts_code": "300750.SZ", "name": "宁德时代"}]],
+            "distances": [[0.2]],
+        }
+        from src.infrastructure.concept_sources import find_stocks_for_concept
+        result = find_stocks_for_concept("金刚石半导体")
+        assert len(result) == 1
+        assert "300750.SZ" in result
+        mock_web.assert_not_called()  # Tier3 不应被调用
+
+    @patch("src.infrastructure.concept_sources._web_search_stocks")
+    @patch("src.infrastructure.database.chroma_collection", None)
+    @patch("src.infrastructure.concept_sources.fetch_concept_stocks", return_value=[])
+    def test_tier3_web_search(self, mock_fetch, mock_web):
+        """Tier3: akshare + ChromaDB 都失败时走 web_search"""
+        mock_web.return_value = {
+            "300750.SZ": {"sources": ["web_search"], "name": "宁德时代"},
+        }
+        from src.infrastructure.concept_sources import find_stocks_for_concept
+        result = find_stocks_for_concept("金刚石半导体")
+        assert len(result) == 1
+        assert result["300750.SZ"]["name"] == "宁德时代"
+
+    @patch("src.infrastructure.concept_sources._web_search_stocks", return_value={})
+    @patch("src.infrastructure.database.chroma_collection", None)
+    @patch("src.infrastructure.concept_sources.fetch_concept_stocks", return_value=[])
+    def test_all_tiers_fail(self, mock_fetch, mock_web):
+        """三重来源全部失败返回空 dict"""
+        from src.infrastructure.concept_sources import find_stocks_for_concept
+        result = find_stocks_for_concept("不存在概念")
+        assert result == {}
+
+
+# ── 15. _write_concept_to_redis 自动补股 ──────────────────────────────────────
+class TestWriteConceptAutoEnrich:
+    @patch("src.infrastructure.concept_sources.find_stocks_for_concept")
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_auto_enrich_on_zero_stocks(self, mock_redis, mock_find):
+        """零股票概念写入时自动触发三重补股"""
+        mock_redis.hget.return_value = json.dumps({
+            "stocks": [], "stocks_detail": {}, "sources": ["llm"],
+        })
+        mock_find.return_value = {
+            "300750.SZ": {"sources": ["semantic"], "name": "宁德时代", "semantic_score": 85},
+            "000001.SZ": {"sources": ["semantic"], "name": "平安银行", "semantic_score": 70},
+        }
+
+        calls = {}
+        mock_redis.hset = lambda h, k, v: calls.setdefault("hset", []).append((h, k, v))
+        mock_redis.sadd = lambda s, v: calls.setdefault("sadd", []).append((s, v))
+        mock_redis.expire = lambda k, t: None
+
+        from src.nodes.concept_graph_builder import _write_concept_to_redis
+        _write_concept_to_redis("金刚石半导体", depth=2, parent_concepts=["新材料"])
+
+        # 补股后应有 stocks
+        hset_data = json.loads(calls["hset"][0][2])
+        assert len(hset_data["stocks"]) == 2
+        assert "300750.SZ" in hset_data["stocks"]
+
+        # 有股票后应加入 layer Set
+        assert "sadd" in calls
+
+    @patch("src.infrastructure.concept_sources.find_stocks_for_concept", return_value={})
+    @patch("src.nodes.concept_graph_builder.redis_client")
+    def test_auto_enrich_fail_skip_layer(self, mock_redis, mock_find):
+        """补股失败时不加入 layer Set"""
+        mock_redis.hget.return_value = json.dumps({
+            "stocks": [], "stocks_detail": {}, "sources": ["llm"],
+        })
+
+        calls = {}
+        mock_redis.hset = lambda h, k, v: calls.setdefault("hset", []).append((h, k, v))
+        mock_redis.sadd = lambda s, v: calls.setdefault("sadd", []).append((s, v))
+        mock_redis.expire = lambda k, t: None
+
+        from src.nodes.concept_graph_builder import _write_concept_to_redis
+        _write_concept_to_redis("金刚石半导体", depth=2, parent_concepts=["新材料"])
+
+        assert "hset" in calls
+        assert "sadd" not in calls  # 无股票不入 layer

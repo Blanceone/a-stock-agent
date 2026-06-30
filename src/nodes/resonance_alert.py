@@ -71,7 +71,7 @@ def _collect_stock_data(ts_codes: list[str]) -> list[dict]:
     stock_data = []
     for i, ts_code in enumerate(ts_codes):
         if i > 0:
-            time.sleep(0.5)  # 东财 API 限流保护
+            time.sleep(2)  # 东财 API 限流保护（push2 接口需较长间隔）
 
         flow = _check_capital_flow(ts_code)
         vr = _check_volume_ratio(ts_code)

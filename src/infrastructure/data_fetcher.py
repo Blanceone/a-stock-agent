@@ -174,9 +174,9 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         f"secid={market}.{code}"
         f"&fields=f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
     )
-    # 重试 3 次（东财 push2 频繁 RemoteDisconnected，需更长退避）
+    # 重试 5 次（东财 push2 频繁 RemoteDisconnected，需更长退避）
     last_err: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             resp = requests.get(url, timeout=10, headers=_EASTMONEY_HEADERS).json()
             data = resp.get("data") or {}
@@ -191,15 +191,15 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
         except (requests.ConnectionError, requests.Timeout) as e:
             # 瞬态错误：重试
             last_err = e
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))  # 退避: 1s, 2s
+            if attempt < 4:
+                time.sleep(2.0 * (attempt + 1))  # 退避: 2s, 4s, 6s, 8s
         except Exception as e:
             # 非瞬态错误：立即抛出，不浪费时间重试
             raise
 
-    # 3次重试均失败（瞬态错误）
+    # 5次重试均失败（瞬态错误）
     raise DataFetchError(
-        f"[moneyflow] {ts_code} 重试3次仍失败: {last_err}"
+        f"[moneyflow] {ts_code} 重试5次仍失败: {last_err}"
     ) if last_err else DataFetchError(f"[moneyflow] {ts_code} 未知错误")
 
 

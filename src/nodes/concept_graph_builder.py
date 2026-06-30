@@ -872,6 +872,9 @@ def get_graph_tree(max_depth: int | None = None) -> dict:
             data = json.loads(raw) if raw else {}
 
             stock_count = len(data.get("stocks", []))
+            # 过滤零股票概念：不显示在图谱树中
+            if stock_count == 0:
+                return None
             policy_score = data.get("policy_score", 0)
 
             node = {

@@ -436,6 +436,9 @@ def concepts_page():
                 data = json.loads(raw)
                 stocks_detail = data.get("stocks_detail", {})
                 stocks_list = data.get("stocks", list(stocks_detail.keys()))
+                # 过滤零股票概念
+                if not stocks_list:
+                    continue
                 items.append({
                     "concept": term,
                     "stocks": stocks_list,

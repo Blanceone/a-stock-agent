@@ -162,10 +162,46 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         raise DataFetchError(f"[daily] {ts_code} 所有来源均失败: {e2}") from e2
 
 
+def _fetch_moneyflow_tencent(ts_code: str) -> dict:
+    """
+    腾讯财经 qt.gtimg.cn 降级源。
+    返回外盘/内盘计算的净买入指标（真实逐笔数据）。
+    """
+    code = ts_code.split(".")[0]
+    market = "sh" if ts_code.endswith(".SH") else "sz"
+    url = f"https://qt.gtimg.cn/q={market}{code}"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    # 解析: v_sz300750="51~宁德时代~300750~393.01~...~270383~137760~132624~..."
+    text = resp.text
+    fields = text.split('"')[1].split('~') if '"' in text else []
+    if len(fields) < 9:
+        raise DataFetchError(f"[moneyflow-tencent] {ts_code} 解析失败: fields={len(fields)}")
+    price = float(fields[3])       # 现价
+    buy_vol = int(fields[7])       # 外盘（主动买入，手）
+    sell_vol = int(fields[8])      # 内盘（主动卖出，手）
+    total_vol = buy_vol + sell_vol
+    if total_vol == 0:
+        net_pct = 0.0
+        net_inflow = 0.0
+    else:
+        net_pct = (buy_vol - sell_vol) / total_vol          # 净买入比例 (-1 ~ +1)
+        net_inflow = (buy_vol - sell_vol) * price * 100     # 净买入金额（元，每手100股）
+    logger.info("[DataFallback] ts_code={} source=tencent buy_vol={} sell_vol={}",
+                ts_code, buy_vol, sell_vol)
+    return {
+        "ts_code": ts_code,
+        "net_inflow": net_inflow,
+        "net_inflow_pct": net_pct,
+        "source": "tencent",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 def fetch_moneyflow_intraday(ts_code: str) -> dict:
     """
-    盘中主力净流入（直接调 a-stock-data 东财 push2 接口，不走 Tushare）。
-    返回：{ts_code, net_inflow, net_inflow_pct, timestamp}
+    盘中主力净流入。信源降级链：东财 push2（5次重试）→ 腾讯财经 qt.gtimg.cn。
+    返回：{ts_code, net_inflow, net_inflow_pct, source, timestamp}
     """
     code = ts_code.split(".")[0]
     market = "1" if ts_code.endswith(".SH") else "0"
@@ -186,6 +222,7 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
                 "ts_code": ts_code,
                 "net_inflow": net_inflow,
                 "net_inflow_pct": net_inflow_pct,
+                "source": "eastmoney-push2",
                 "timestamp": datetime.now().isoformat(),
             }
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -197,10 +234,9 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
             # 非瞬态错误：立即抛出，不浪费时间重试
             raise
 
-    # 5次重试均失败（瞬态错误）
-    raise DataFetchError(
-        f"[moneyflow] {ts_code} 重试5次仍失败: {last_err}"
-    ) if last_err else DataFetchError(f"[moneyflow] {ts_code} 未知错误")
+    # 5次重试均失败（瞬态错误）→ 降级腾讯财经
+    logger.warning("[DataFallback] ts_code={} push2 5次失败，降级腾讯财经", ts_code)
+    return _fetch_moneyflow_tencent(ts_code)
 
 
 def fetch_top_list(trade_date: str) -> pd.DataFrame:

@@ -38,11 +38,12 @@ def _check_capital_flow(ts_code: str) -> dict:
         data = fetch_moneyflow_intraday(ts_code)
         net_inflow = data.get("net_inflow", 0)
         net_inflow_pct = data.get("net_inflow_pct", 0)
+        source = data.get("source", "eastmoney-push2")
 
         return {
             "inflow_pct": round(net_inflow_pct, 2),
             "net_buy_amt": round(net_inflow, 0),
-            "source": "a-stock-data",
+            "source": source,
         }
     except Exception as e:
         logger.warning("[resonance] 资金流查询失败 ts_code={} reason={}", ts_code, e)

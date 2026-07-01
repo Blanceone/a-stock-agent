@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     circ_mv     NUMERIC(18,4),
     is_st       BOOLEAN      DEFAULT FALSE,
     list_status VARCHAR(2)   DEFAULT 'L',
+    biz_text_updated_at TIMESTAMP,
     updated_at  TIMESTAMP    DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_stock_basic_st ON stock_basic(is_st);
@@ -142,6 +143,7 @@ def _init_postgres() -> psycopg2.pool.ThreadedConnectionPool:
         # 补丁：为已有表添加缺失列（单独事务，避免已存在时报错）
         _patch_sqls = [
             "ALTER TABLE sop_active ADD COLUMN created_at TIMESTAMP DEFAULT NOW()",
+            "ALTER TABLE stock_basic ADD COLUMN IF NOT EXISTS biz_text_updated_at TIMESTAMP",
         ]
         for sql in _patch_sqls:
             try:
@@ -305,6 +307,31 @@ class _CollectionCompat:
         )
         if not resp.ok:
             logger.warning("[ChromaDB] add failed: {} {}", resp.status_code, resp.text[:200])
+        return resp.json() if resp.ok else None
+
+    def upsert(self, ids, documents, metadatas=None, embeddings=None):
+        """Upsert 文档（已存在则更新，不存在则插入）"""
+        if embeddings is None and self._ef is not None:
+            try:
+                embeddings = self._ef(documents)
+            except Exception:
+                embeddings = None
+        payload = {"ids": ids, "documents": documents}
+        if metadatas:
+            payload["metadatas"] = metadatas
+        if embeddings is not None:
+            import numpy as np
+            if isinstance(embeddings, np.ndarray):
+                embeddings = embeddings.tolist()
+            elif isinstance(embeddings, list):
+                embeddings = [e.tolist() if isinstance(e, np.ndarray) else e for e in embeddings]
+            payload["embeddings"] = embeddings
+        resp = self._session.post(
+            f"{self._base}/api/v1/collections/{self._id}/upsert",
+            json=payload, timeout=30,
+        )
+        if not resp.ok:
+            logger.warning("[ChromaDB] upsert failed: {} {}", resp.status_code, resp.text[:200])
         return resp.json() if resp.ok else None
 
     def query(self, query_texts, n_results=10, where=None):

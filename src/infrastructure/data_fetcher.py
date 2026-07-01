@@ -135,11 +135,21 @@ def fetch_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
             "[DataFallback] ts_code={} api=tushare.daily "
             "reason={} fallback_to=a-stock-data", ts_code, e
         )
+        logger.bind(
+            event_type="data_fallback", data_type="daily",
+            failed_source="tushare", fallback_source="a-stock-data",
+            reason=str(e),
+        ).warning("DataFallback daily")
     except Exception as e:
         logger.warning(
             "[DataFallback] ts_code={} api=tushare.daily "
             "reason={} fallback_to=a-stock-data", ts_code, e
         )
+        logger.bind(
+            event_type="data_fallback", data_type="daily",
+            failed_source="tushare", fallback_source="a-stock-data",
+            reason=str(e),
+        ).warning("DataFallback daily")
 
     # L2: a-stock-data（东财日线接口）
     try:
@@ -236,6 +246,11 @@ def fetch_moneyflow_intraday(ts_code: str) -> dict:
 
     # 5次重试均失败（瞬态错误）→ 降级腾讯财经
     logger.warning("[DataFallback] ts_code={} push2 5次失败，降级腾讯财经", ts_code)
+    logger.bind(
+        event_type="data_fallback", data_type="moneyflow",
+        failed_source="eastmoney-push2", fallback_source="tencent",
+        reason=f"5 retries failed: {last_err}",
+    ).warning("DataFallback moneyflow")
     return _fetch_moneyflow_tencent(ts_code)
 
 
@@ -291,6 +306,11 @@ def fetch_business_description(ts_code: str, company_name: str) -> str:
             return f"核心题材：{text}"
     except Exception as e:
         logger.debug("[DataFallback] ts_code={} api=东财F10 reason={}", ts_code, e)
+        logger.bind(
+            event_type="data_fallback", data_type="business_desc",
+            failed_source="eastmoney-f10", fallback_source="tushare",
+            reason=str(e),
+        ).warning("DataFallback business_desc")
 
     # L2: Tushare stock_company main_business（兜底）
     try:

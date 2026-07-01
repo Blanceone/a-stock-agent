@@ -87,5 +87,9 @@ class Settings(BaseSettings):
         "第十五个五年规划 重点产业方向"
     )
 
+    # ── 语义知识库增量更新 ─────────────────────────────────
+    semantic_stale_days: int = int(os.getenv("SEMANTIC_STALE_DAYS", "90"))
+    force_update_stocks: str = os.getenv("FORCE_UPDATE_STOCKS", "")  # 逗号分隔的强制更新 ts_code
+
 
 settings = Settings()

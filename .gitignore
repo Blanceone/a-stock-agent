@@ -33,3 +33,6 @@ resources/defuddle-service/node_modules/
 Thumbs.db
 .DS_Store
 *.png
+
+# 可观测性日志
+logs/

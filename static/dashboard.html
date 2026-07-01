@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>A股投研智能体 - 数据仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 :root {
@@ -226,6 +227,8 @@ tr:hover td { background:rgba(59,130,246,0.04); }
 <script>
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
+let _graphChart = null;
+let _graphRawData = null;
 const el = (tag, cls, html) => { const e = document.createElement(tag); if(cls) e.className=cls; if(html!==undefined) e.innerHTML=html; return e; };
 
 async function api(path) {
@@ -655,9 +658,15 @@ async function renderConcepts() {
 
   // ── 图谱层级视图 ──
   html += `<div class="panel" id="conceptGraphTree" style="display:none;margin-bottom:20px">
-    <div class="panel-header"><div class="panel-title">图谱层级视图</div>
-    <button class="btn btn-blue btn-sm" onclick="loadGraphTree()">&#8635; 刷新</button></div>
-    <div id="graphTreeContent"></div>
+    <div class="panel-header">
+      <div class="panel-title">概念图谱可视化</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="graphNodeCount" style="color:var(--muted);font-size:12px"></span>
+        <button class="btn btn-blue btn-sm" onclick="resetGraphView()">重置视图</button>
+        <button class="btn btn-blue btn-sm" onclick="loadGraphTree()">&#8635; 刷新</button>
+      </div>
+    </div>
+    <div id="graphChartContainer" style="width:100%;height:600px;"></div>
   </div>`;
 
   // ── 概念列表 ──
@@ -758,41 +767,121 @@ async function pollGraphProgress() {
   }
 }
 
+// ── ECharts 概念图谱 ──
+function transformToEChartsTree(apiData) {
+  const depthColors = ['#dc2626', '#f59e0b', '#3b82f6', '#8b5cf6'];
+  function convertNode(node) {
+    const depth = node.depth || 0;
+    const stockCount = node.stock_count || 0;
+    const symbolSize = Math.min(40, 12 + Math.floor(stockCount / 5));
+    return {
+      name: node.concept,
+      value: stockCount,
+      symbolSize: symbolSize,
+      depth: depth,
+      policy_anchor: node.policy_anchor || '',
+      policy_score: node.policy_score || 0,
+      relevance: node.relevance || 0,
+      relation: node.relation || '',
+      itemStyle: {
+        color: depthColors[Math.min(depth, depthColors.length - 1)],
+        borderColor: depth === 0 ? '#fbbf24' : 'rgba(255,255,255,0.15)',
+        borderWidth: depth === 0 ? 2 : 1,
+      },
+      label: {
+        color: depthColors[Math.min(depth, depthColors.length - 1)],
+        fontSize: depth === 0 ? 14 : (depth === 1 ? 12 : 11),
+        fontWeight: depth <= 1 ? 'bold' : 'normal',
+      },
+      children: (node.children || []).map(convertNode),
+    };
+  }
+  const roots = (apiData.nodes || []).map(convertNode);
+  if (roots.length === 1) return roots[0];
+  return {
+    name: '政策概念图谱',
+    depth: -1,
+    itemStyle: { color: '#6b7280', borderColor: '#6b7280' },
+    label: { color: '#6b7280', fontSize: 13, fontWeight: 'bold' },
+    children: roots,
+  };
+}
+
 async function loadGraphTree() {
   const d = await api('/api/concept-graph/tree');
   const panel = document.getElementById('conceptGraphTree');
-  const content = document.getElementById('graphTreeContent');
-  if (!panel || !content) return;
+  const container = document.getElementById('graphChartContainer');
+  const countEl = document.getElementById('graphNodeCount');
+  if (!panel || !container) return;
   if (!d || !d.nodes || !d.nodes.length) { panel.style.display = 'none'; return; }
-
   panel.style.display = 'block';
-  let html = `<div style="color:var(--muted);font-size:13px;margin-bottom:12px">共 ${d.total_nodes} 个概念 | 最大深度 ${d.max_depth}</div>`;
+  _graphRawData = d;
+  if (countEl) countEl.textContent = `${d.total_nodes} 个概念 | 深度 ${d.max_depth}`;
+  const treeData = transformToEChartsTree(d);
+  if (_graphChart) _graphChart.dispose();
+  _graphChart = echarts.init(container, null, { renderer: 'canvas' });
+  const depthColors = ['#dc2626', '#f59e0b', '#3b82f6', '#8b5cf6'];
+  const option = {
+    toolbox: { feature: { saveAsImage: { title: '保存图片', pixelRatio: 2 }, restore: { title: '还原' } }, iconStyle: { borderColor: '#6b7280' }, right: 20, top: 10 },
+    tooltip: {
+      trigger: 'item', triggerOn: 'mousemove',
+      backgroundColor: 'rgba(26,29,41,0.95)', borderColor: '#2a2d3a',
+      textStyle: { color: '#e1e4ea', fontSize: 13 },
+      formatter: function(params) {
+        const data = params.data;
+        if (!data || data.depth === undefined) return '';
+        const depth = data.depth;
+        const depthLabel = depth < 0 ? '虚拟根' : `Layer ${depth}`;
+        const dc = depth >= 0 ? depthColors[Math.min(depth, 3)] : '#6b7280';
+        let html = `<div style="font-weight:600;font-size:14px;color:${dc};margin-bottom:6px">${escHtml(data.name)}</div>`;
+        html += `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#6b7280">层级</span><span>${depthLabel}</span></div>`;
+        html += `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#6b7280">关联股票</span><span style="color:#10b981;font-weight:600">${data.value || 0} 只</span></div>`;
+        if (data.policy_score > 0) html += `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#6b7280">政策评分</span><span style="color:#8b5cf6">${data.policy_score.toFixed(1)}</span></div>`;
+        if (data.policy_anchor) { const a = data.policy_anchor.length > 40 ? data.policy_anchor.substring(0,40)+'...' : data.policy_anchor; html += `<div style="color:#6b7280;margin-top:4px;font-size:11px">锚点: ${escHtml(a)}</div>`; }
+        if (data.relation) html += `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#6b7280">关系</span><span>${escHtml(data.relation)}</span></div>`;
+        if (data.relevance > 0) html += `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#6b7280">关联度</span><span>${(data.relevance*100).toFixed(0)}%</span></div>`;
+        return html;
+      },
+    },
+    series: [{
+      type: 'tree', data: [treeData], layout: 'orthogonal', orient: 'LR',
+      top: '5%', left: '12%', bottom: '5%', right: '18%',
+      symbol: 'circle', edgeShape: 'polyline', edgeForkPosition: '50%',
+      initialTreeDepth: 2, roam: true, expandAndCollapse: true,
+      label: { position: 'left', verticalAlign: 'middle', align: 'right', fontSize: 12, color: '#e1e4ea', distance: 8,
+        formatter: function(p) { const n = p.data.name||''; return n.length > 10 ? n.substring(0,10)+'...' : n; } },
+      leaves: { label: { position: 'right', align: 'left' } },
+      lineStyle: { color: '#2a2d3a', width: 1.5, curveness: 0.5 },
+      emphasis: { focus: 'ancestor', itemStyle: { borderColor: '#fbbf24', borderWidth: 3, shadowBlur: 10, shadowColor: 'rgba(251,191,36,0.4)' }, lineStyle: { width: 2.5, color: '#fbbf24' } },
+      blur: { itemStyle: { opacity: 0.15 }, lineStyle: { opacity: 0.1 } },
+      animationDuration: 400, animationDurationUpdate: 500,
+    }],
+  };
+  _graphChart.setOption(option);
+  if (window._graphResizeObserver) window._graphResizeObserver.disconnect();
+  window._graphResizeObserver = new ResizeObserver(() => { if (_graphChart) _graphChart.resize(); });
+  window._graphResizeObserver.observe(container);
+  _graphChart.on('click', function(params) {
+    const name = params.data?.name;
+    if (!name || name === '政策概念图谱') return;
+    highlightConceptInList(name);
+  });
+}
 
-  function renderNode(node, indent) {
-    const pad = indent * 24;
-    const colors = ['var(--accent)', 'var(--green)', 'var(--purple)', 'var(--yellow)'];
-    const depthColor = colors[Math.min(indent, 3)];
-    const prefix = indent > 0 ? '<span style="color:var(--border)">└─</span> ' : '';
-    const relStr = node.relation ? ` | ${escHtml(node.relation)}` : '';
-    const relScore = node.relevance ? ` (${(node.relevance*100).toFixed(0)}%)` : '';
-    const anchorStr = node.policy_anchor ? `<span style="color:var(--purple);font-size:11px;margin-left:6px">[${escHtml(node.policy_anchor.substring(0,30))}]</span>` : '';
+function resetGraphView() {
+  if (_graphChart) _graphChart.dispatchAction({ type: 'restore' });
+}
 
-    html += `<div style="padding:6px 0 6px ${pad}px;border-bottom:1px solid var(--border);font-size:13px">
-      ${prefix}<span style="font-weight:600;color:${depthColor}">${escHtml(node.concept)}</span>
-      <span style="color:var(--muted);font-size:12px;margin-left:8px">L${node.depth} | ${node.stock_count||0}股${relStr}${relScore}</span>
-      ${anchorStr}
-    </div>`;
-    if (node.children) {
-      for (const child of node.children) {
-        renderNode(child, indent + 1);
-      }
-    }
+function highlightConceptInList(conceptName) {
+  const cid = 'concept-' + encodeURIComponent(conceptName);
+  const card = document.getElementById(cid);
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.style.transition = 'box-shadow 0.3s';
+    card.style.boxShadow = '0 0 0 2px #fbbf24, 0 0 16px rgba(251,191,36,0.3)';
+    setTimeout(() => { card.style.boxShadow = ''; }, 2000);
+    if (!card.classList.contains('expanded')) toggleConceptExpand(conceptName, cid);
   }
-
-  for (const root of d.nodes) {
-    renderNode(root, 0);
-  }
-  content.innerHTML = html;
 }
 
 async function addManualConcept() {
@@ -868,6 +957,10 @@ async function toggleConceptExpand(conceptName, cardId) {
   if (!d.related_news?.length) html += '<div class="empty" style="padding:10px">暂无相关新闻</div>';
   html += '</div></div>';
   detail.innerHTML = html;
+  // 列表→图谱反向联动
+  if (_graphChart) {
+    _graphChart.dispatchAction({ type: 'highlight', seriesIndex: 0, name: conceptName });
+  }
 }
 
 // ── SOP ──

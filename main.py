@@ -5,8 +5,10 @@ main.py — A股宏观锚定投研智能体 系统入口
   python main.py --mode static --pdf <policy_pdf_path>   # 静态图谱构建
   python main.py --mode dynamic                          # 动态监控（定时任务）
   python main.py --mode init                             # 初始化基础设施（建表、全A股入库）
-  python main.py --mode semantic                         # 语义知识库初始化（主营业务向量化入库）
+  python main.py --mode semantic                         # 语义知识库初始化（全量）
+  python main.py --mode semantic --incremental           # 语义知识库增量更新
   python main.py --mode concept_graph                    # 政策概念图谱构建
+  python main.py --mode stats                            # 查看昨日运行统计
 """
 from __future__ import annotations
 
@@ -25,6 +27,43 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # 加载环境变量（.env 文件）
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+# ── 可观测性：JSON 日志 sink ───────────────────────────────────────────────
+def _setup_obs_logger() -> None:
+    """添加 JSON 文件 sink，仅记录 bind(event_type=...) 的结构化日志"""
+    import datetime as _dt
+
+    logs_dir = PROJECT_ROOT / "logs"
+    logs_dir.mkdir(exist_ok=True)
+
+    def _json_sink(message):
+        record = message.record
+        extra = record["extra"]
+        if not extra.get("event_type"):
+            return  # 普通日志不写入 JSON 文件
+        entry = {
+            "ts": record["time"].isoformat(),
+            "level": record["level"].name,
+            "event_type": extra.get("event_type"),
+            "message": record["message"],
+        }
+        # 合并所有 bind 注入的字段
+        for k in ("model", "tokens_input", "tokens_output", "latency_ms",
+                  "prompt_template", "cached", "rounds",
+                  "node_name", "status",
+                  "data_type", "failed_source", "fallback_source", "reason"):
+            if k in extra:
+                entry[k] = extra[k]
+        with open(logs_dir / f"app_{_dt.date.today().isoformat()}.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    logger.add(
+        _json_sink,
+        filter=lambda r: r["extra"].get("event_type"),
+        level="DEBUG",
+        enqueue=True,
+    )
 
 
 def run_static(pdf_path: str) -> None:
@@ -610,7 +649,7 @@ def run_init() -> None:
         release_pg_conn(conn)
 
 
-def run_semantic() -> None:
+def run_semantic(incremental: bool = False) -> None:
     """语义知识库初始化：主营业务文本 → V4-Flash 摘要 → ChromaDB 向量化"""
     from src.infrastructure.env_check import ensure_env
     ensure_env(need_pg=True, need_chromadb=True)
@@ -618,10 +657,11 @@ def run_semantic() -> None:
     from src.infrastructure.semantic_init import run as semantic_run
 
     init_all()
-    logger.info("[Main] 启动语义知识库初始化")
+    mode_label = "增量" if incremental else "全量"
+    logger.info("[Main] 启动语义知识库初始化（{}）", mode_label)
 
-    stats = semantic_run()
-    logger.info("[Main] 语义知识库初始化完成: {}", stats)
+    stats = semantic_run(incremental=incremental)
+    logger.info("[Main] 语义知识库初始化完成（{}）: {}", mode_label, stats)
 
 
 def run_concept_graph(policy_text: str = "") -> None:
@@ -641,15 +681,113 @@ def run_concept_graph(policy_text: str = "") -> None:
     logger.info("[Main] 概念图谱构建完成: {}", stats)
 
 
+def run_stats() -> None:
+    """读取昨日 JSON 日志，输出统计报告"""
+    import datetime as _dt
+    from collections import defaultdict
+
+    logs_dir = PROJECT_ROOT / "logs"
+    yesterday = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
+    log_file = logs_dir / f"app_{yesterday}.log"
+
+    if not log_file.exists():
+        # 回退到今天的日志
+        log_file = logs_dir / f"app_{_dt.date.today().isoformat()}.log"
+        if not log_file.exists():
+            print(f"[Stats] 未找到日志文件: {log_file}")
+            return
+
+    records = []
+    with open(log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not records:
+        print(f"[Stats] 日志文件为空: {log_file}")
+        return
+
+    print(f"\n{'='*60}")
+    print(f" 系统运行统计报告  ({log_file.name})")
+    print(f"{'='*60}\n")
+
+    # 1. Token 消耗统计
+    token_by_model = defaultdict(lambda: {"input": 0, "output": 0, "calls": 0})
+    for r in records:
+        if r.get("event_type") == "llm_call":
+            model = r.get("model", "unknown")
+            token_by_model[model]["input"] += r.get("tokens_input", 0)
+            token_by_model[model]["output"] += r.get("tokens_output", 0)
+            token_by_model[model]["calls"] += 1
+
+    if token_by_model:
+        print("【Token 消耗】")
+        total_in = total_out = total_calls = 0
+        for model, stats in sorted(token_by_model.items()):
+            print(f"  {model}: {stats['calls']}次 | 输入 {stats['input']:,} | 输出 {stats['output']:,}")
+            total_in += stats["input"]
+            total_out += stats["output"]
+            total_calls += stats["calls"]
+        print(f"  合计: {total_calls}次 | 输入 {total_in:,} | 输出 {total_out:,}")
+        print()
+
+    # 2. 节点平均耗时
+    node_latency = defaultdict(list)
+    for r in records:
+        if r.get("event_type") == "node_exec":
+            node_latency[r.get("node_name", "?")].append(r.get("latency_ms", 0))
+
+    if node_latency:
+        print("【节点平均耗时】")
+        for node, latencies in sorted(node_latency.items()):
+            avg = sum(latencies) / len(latencies)
+            mx = max(latencies)
+            print(f"  {node}: 平均 {avg:.0f}ms | 最大 {mx}ms | 调用 {len(latencies)}次")
+        print()
+
+    # 3. 降级触发 TOP3
+    fallback_count = defaultdict(int)
+    for r in records:
+        if r.get("event_type") == "data_fallback":
+            key = f"{r.get('failed_source', '?')} → {r.get('fallback_source', '?')}"
+            fallback_count[key] += 1
+
+    if fallback_count:
+        print("【降级触发 TOP3】")
+        for key, count in sorted(fallback_count.items(), key=lambda x: -x[1])[:3]:
+            print(f"  {key}: {count}次")
+        print()
+
+    # 4. LLM 调用耗时
+    llm_latencies = [r.get("latency_ms", 0) for r in records if r.get("event_type") == "llm_call" and not r.get("cached")]
+    if llm_latencies:
+        avg_llm = sum(llm_latencies) / len(llm_latencies)
+        print(f"【LLM 平均耗时】{avg_llm:.0f}ms (非缓存，共 {len(llm_latencies)} 次)\n")
+
+    print(f"{'='*60}")
+    print(f" 报告生成时间: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="A股宏观锚定投研智能体")
     parser.add_argument(
-        "--mode", required=True, choices=["static", "dynamic", "init", "semantic", "concept_graph"],
-        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库, semantic=语义知识库, concept_graph=政策概念图谱"
+        "--mode", required=True,
+        choices=["static", "dynamic", "init", "semantic", "concept_graph", "stats"],
+        help="运行模式：static=静态图谱, dynamic=动态监控, init=初始化入库, semantic=语义知识库, concept_graph=政策概念图谱, stats=运行统计"
     )
     parser.add_argument("--pdf", type=str, default="", help="政策PDF路径（static模式）")
     parser.add_argument("--policy-text", type=str, default="", help="政策文本路径或内容（concept_graph模式可选）")
+    parser.add_argument("--incremental", action="store_true", default=False,
+                        help="增量模式（仅 semantic 模式有效，只更新过期/新增股票）")
     args = parser.parse_args()
+
+    # 初始化可观测性日志
+    _setup_obs_logger()
 
     if args.mode == "static":
         if not args.pdf:
@@ -660,9 +798,11 @@ def main():
     elif args.mode == "init":
         run_init()
     elif args.mode == "semantic":
-        run_semantic()
+        run_semantic(incremental=args.incremental)
     elif args.mode == "concept_graph":
         run_concept_graph(args.policy_text)
+    elif args.mode == "stats":
+        run_stats()
 
 
 if __name__ == "__main__":

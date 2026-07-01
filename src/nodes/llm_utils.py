@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,9 @@ def _set_cache(messages: list[dict], result: str) -> None:
     redis_client.setex(key, settings.redis_llm_cache_ttl, result)
 
 
+# ── Prompt 模板名追踪（load_prompt 写入，call_llm 读取后清空）──────────────
+_last_prompt_name: str = ""
+
 # ── 核心调用 ──────────────────────────────────────────────────────────────────
 def call_llm(
     prompt: str,
@@ -67,6 +71,7 @@ def call_llm(
     调用 DeepSeek 模型，返回原始文本响应。
     model: "flash" 或 "pro"
     """
+    global _last_prompt_name
     model_id = settings.model_flash if model == "flash" else settings.model_pro
     messages = [
         {"role": "system", "content": system},
@@ -77,18 +82,41 @@ def call_llm(
         cached = _get_cached(messages)
         if cached:
             logger.debug("[LLM] 缓存命中 model={}", model_id)
+            logger.bind(
+                event_type="llm_call", model=model_id,
+                tokens_input=0, tokens_output=0, latency_ms=0,
+                prompt_template=_last_prompt_name or "cache_hit",
+                cached=True,
+            ).info("LLM cache hit")
+            _last_prompt_name = ""
             return cached
 
     client = _get_client()
     logger.debug("[LLM] 调用 model={} prompt_len={}", model_id, len(prompt))
 
+    t0 = _time.monotonic()
     resp = client.chat.completions.create(
         model=model_id,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
     )
+    latency_ms = round((_time.monotonic() - t0) * 1000)
     result = resp.choices[0].message.content.strip()
+
+    # 提取 token 用量
+    tokens_in = getattr(resp.usage, "prompt_tokens", 0) if resp.usage else 0
+    tokens_out = getattr(resp.usage, "completion_tokens", 0) if resp.usage else 0
+
+    prompt_tpl = _last_prompt_name or ""
+    _last_prompt_name = ""
+
+    logger.bind(
+        event_type="llm_call", model=model_id,
+        tokens_input=tokens_in, tokens_output=tokens_out,
+        latency_ms=latency_ms, prompt_template=prompt_tpl,
+        cached=False,
+    ).info("LLM call {} tokens={}/{}  {}ms", model_id, tokens_in, tokens_out, latency_ms)
 
     if use_cache:
         _set_cache(messages, result)
@@ -226,6 +254,7 @@ def call_llm_with_tools(
     最多 max_rounds 轮工具调用，防止死循环。
     返回解析后的 JSON（dict 或 list）。
     """
+    global _last_prompt_name
     if tools is None:
         tools = DEFAULT_TOOLS
 
@@ -236,10 +265,14 @@ def call_llm_with_tools(
     ]
 
     client = _get_client()
+    t_start = _time.monotonic()
+    total_tokens_in = 0
+    total_tokens_out = 0
 
     for round_num in range(max_rounds):
         logger.debug("[LLM-Tools] round={} model={} messages={}", round_num, model_id, len(messages))
 
+        t0 = _time.monotonic()
         resp = client.chat.completions.create(
             model=model_id,
             messages=messages,
@@ -248,13 +281,27 @@ def call_llm_with_tools(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        latency_ms = round((_time.monotonic() - t0) * 1000)
+        if resp.usage:
+            total_tokens_in += getattr(resp.usage, "prompt_tokens", 0)
+            total_tokens_out += getattr(resp.usage, "completion_tokens", 0)
 
         msg = resp.choices[0].message
 
         # 无 tool_calls → 最终回答
         if not msg.tool_calls:
             content = (msg.content or "").strip()
+            total_ms = round((_time.monotonic() - t_start) * 1000)
             logger.debug("[LLM-Tools] 最终回答（{} 轮）len={}", round_num + 1, len(content))
+            prompt_tpl = _last_prompt_name or ""
+            _last_prompt_name = ""
+            logger.bind(
+                event_type="llm_call", model=model_id,
+                tokens_input=total_tokens_in, tokens_output=total_tokens_out,
+                latency_ms=total_ms, prompt_template=prompt_tpl,
+                rounds=round_num + 1, cached=False,
+            ).info("LLM-Tools {} rounds={} tokens={}/{} {}ms",
+                   model_id, round_num + 1, total_tokens_in, total_tokens_out, total_ms)
             return _parse_json(content)
 
         # 有 tool_calls → 执行工具并回传结果
@@ -295,7 +342,20 @@ def call_llm_with_tools(
         resp = client.chat.completions.create(
             model=model_id, messages=messages, temperature=temperature, max_tokens=max_tokens,
         )
+        if resp.usage:
+            total_tokens_in += getattr(resp.usage, "prompt_tokens", 0)
+            total_tokens_out += getattr(resp.usage, "completion_tokens", 0)
         content = (resp.choices[0].message.content or "").strip()
+        total_ms = round((_time.monotonic() - t_start) * 1000)
+        prompt_tpl = _last_prompt_name or ""
+        _last_prompt_name = ""
+        logger.bind(
+            event_type="llm_call", model=model_id,
+            tokens_input=total_tokens_in, tokens_output=total_tokens_out,
+            latency_ms=total_ms, prompt_template=prompt_tpl,
+            rounds=max_rounds + 1, cached=False,
+        ).info("LLM-Tools forced final {} rounds={} tokens={}/{} {}ms",
+               model_id, max_rounds + 1, total_tokens_in, total_tokens_out, total_ms)
         return _parse_json(content)
     except Exception as e:
         logger.error("[LLM-Tools] 强制最终回答失败: {}", e)
@@ -308,6 +368,8 @@ _PROMPT_DIR = Path(__file__).parent.parent.parent / "config" / "prompts"
 
 
 def load_prompt(name: str) -> str:
-    """加载 config/prompts/{name}.txt 模板"""
+    """加载 config/prompts/{name}.txt 模板，并记录模板名供埋点使用"""
+    global _last_prompt_name
+    _last_prompt_name = name
     path = _PROMPT_DIR / f"{name}.txt"
     return path.read_text(encoding="utf-8")

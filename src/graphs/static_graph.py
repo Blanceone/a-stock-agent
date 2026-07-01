@@ -10,6 +10,7 @@ static_graph.py — 静态图谱 DAG 编排
 """
 from __future__ import annotations
 
+import time as _time
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -39,11 +40,23 @@ class StaticState(TypedDict, total=False):
 
 # ── 节点包装（错误隔离）───────────────────────────────────────────────────────
 def _safe_call(node_name: str, node_fn, state: StaticState) -> dict:
-    """统一错误隔离包装器"""
+    """统一错误隔离包装器，含执行计时埋点"""
+    t0 = _time.monotonic()
     try:
-        return node_fn(state)
+        result = node_fn(state)
+        latency_ms = round((_time.monotonic() - t0) * 1000)
+        logger.bind(
+            event_type="node_exec", node_name=node_name,
+            status="ok", latency_ms=latency_ms,
+        ).info("Node {} ok {}ms", node_name, latency_ms)
+        return result
     except Exception as e:
+        latency_ms = round((_time.monotonic() - t0) * 1000)
         logger.error("[StaticGraph] 节点 {} 执行失败: {}", node_name, e, exc_info=True)
+        logger.bind(
+            event_type="node_exec", node_name=node_name,
+            status="error", latency_ms=latency_ms,
+        ).error("Node {} error {}ms", node_name, latency_ms)
         return {
             "error_node": node_name,
             "error_msg": str(e),

@@ -25,6 +25,7 @@ from src.infrastructure import database
 from src.infrastructure.database import get_pg_conn, release_pg_conn
 from src.infrastructure.data_fetcher import fetch_business_description
 from src.nodes.llm_utils import call_llm
+from datetime import datetime as _datetime
 
 
 # ── 摘要 Prompt ───────────────────────────────────────────────────────────────
@@ -53,18 +54,46 @@ def _get_existing_ts_codes() -> set[str]:
     return set()
 
 
-def _get_all_stocks() -> list[dict]:
-    """从 PostgreSQL 读取全A股基础信息（使用直连避免连接池 SSH 隧道冲突）"""
+def _get_all_stocks(incremental: bool = False) -> list[dict]:
+    """从 PostgreSQL 读取A股基础信息。
+    
+    incremental=True 时仅返回过期/新增股票：
+      - biz_text_updated_at IS NULL（从未更新）
+      - biz_text_updated_at < NOW() - INTERVAL 'N days'（超过 semantic_stale_days 天）
+      - 合入 force_update_stocks 列表
+    """
     import psycopg2 as _pg2
     from config.settings import settings as _settings
     conn = _pg2.connect(_settings.pg_dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ts_code, name, industry FROM stock_basic "
-                "WHERE is_st = FALSE AND list_status = 'L'"
-            )
-            rows = cur.fetchall()
+            base_sql = "SELECT ts_code, name, industry FROM stock_basic WHERE is_st = FALSE AND list_status = 'L'"
+            if incremental:
+                stale_days = _settings.semantic_stale_days
+                force_codes = [c.strip() for c in _settings.force_update_stocks.split(",") if c.strip()]
+                sql = (
+                    f"{base_sql} AND ("
+                    f"biz_text_updated_at IS NULL "
+                    f"OR biz_text_updated_at < NOW() - INTERVAL '{stale_days} days'"
+                    f")"
+                )
+                cur.execute(sql)
+                rows = cur.fetchall()
+                # 合入强制更新列表
+                existing_codes = {r[0] for r in rows}
+                for tc in force_codes:
+                    if tc and tc not in existing_codes:
+                        cur.execute(
+                            "SELECT ts_code, name, industry FROM stock_basic WHERE ts_code = %s",
+                            (tc,)
+                        )
+                        extra = cur.fetchall()
+                        rows.extend(extra)
+                logger.info("[SemanticInit] 增量模式: 过期/新增 {} 只, 强制更新 {} 只",
+                           len(rows) - len(force_codes), len(force_codes))
+            else:
+                cur.execute(base_sql)
+                rows = cur.fetchall()
         return [{"ts_code": r[0], "name": r[1], "industry": r[2]} for r in rows]
     finally:
         conn.close()
@@ -161,31 +190,40 @@ def _persist_llm_concepts(redis_client, concepts: list[str], ts_code: str, name:
             logger.debug("[SemanticInit] 概念持久化失败 {}: {}", concept, e)
 
 
-def run() -> dict:
+def run(incremental: bool = False) -> dict:
     """
     语义知识库初始化主流程。
+    
+    incremental=True: 仅更新过期/新增股票，使用 upsert 覆盖，
+                      写完后回写 PG biz_text_updated_at = NOW()。
     返回统计信息 dict。
     """
     if database.chroma_collection is None:
         raise RuntimeError("ChromaDB 未初始化，请先调用 init_all()")
 
-    logger.info("[SemanticInit] ===== 开始全A股语义知识库初始化 =====")
+    mode_label = "增量" if incremental else "全量"
+    logger.info("[SemanticInit] ===== 开始{}语义知识库初始化 =====", mode_label)
 
-    # 1. 获取已有数据（增量更新）
-    existing = _get_existing_ts_codes()
-    logger.info("[SemanticInit] ChromaDB 已有 {} 只股票", len(existing))
+    # 1. 获取已有数据（全量模式下用于跳过已入库的）
+    existing = set()
+    if not incremental:
+        existing = _get_existing_ts_codes()
+        logger.info("[SemanticInit] ChromaDB 已有 {} 只股票", len(existing))
 
-    # 2. 获取全A股列表
-    stocks = _get_all_stocks()
-    logger.info("[SemanticInit] PostgreSQL 中共 {} 只上市股票", len(stocks))
+    # 2. 获取股票列表
+    stocks = _get_all_stocks(incremental=incremental)
+    logger.info("[SemanticInit] 待处理 {} 只股票", len(stocks))
 
-    # 3. 过滤已入库的
-    pending = [s for s in stocks if s["ts_code"] not in existing]
-    logger.info("[SemanticInit] 待处理 {} 只（跳过已入库的 {} 只）",
-                len(pending), len(stocks) - len(pending))
+    # 3. 全量模式过滤已入库的
+    if incremental:
+        pending = stocks  # 增量模式：全部处理（upsert 覆盖）
+    else:
+        pending = [s for s in stocks if s["ts_code"] not in existing]
+        logger.info("[SemanticInit] 待处理 {} 只（跳过已入库的 {} 只）",
+                    len(pending), len(stocks) - len(pending))
 
     stats = {"total": len(pending), "success": 0, "failed": 0, "skipped": 0,
-             "concept_classified": 0}
+             "concept_classified": 0, "mode": mode_label}
     batch_ids: list[str] = []
     batch_docs: list[str] = []
     batch_metas: list[dict] = []
@@ -193,6 +231,8 @@ def run() -> dict:
     # 4. 读取已知概念列表（用于 LLM 分类）
     known_concepts = _get_known_concepts()
     logger.info("[SemanticInit] 已有 {} 个概念可用于分类", len(known_concepts))
+
+    now_iso = _datetime.now().isoformat()
 
     for idx, stock in enumerate(pending, 1):
         ts_code = stock["ts_code"]
@@ -230,20 +270,27 @@ def run() -> dict:
             except Exception as e:
                 logger.debug("[SemanticInit] 概念分类异常 {}: {}", ts_code, e)
 
-        # 批量累积
+        # 批量累积（增量模式增加 updated_at metadata）
+        meta = {"ts_code": ts_code, "name": name, "industry": industry or ""}
+        if incremental:
+            meta["updated_at"] = now_iso
         batch_ids.append(ts_code)
         batch_docs.append(summary)
-        batch_metas.append({"ts_code": ts_code, "name": name, "industry": industry or ""})
+        batch_metas.append(meta)
 
         stats["success"] += 1
 
         # 每 50 只写入一次 ChromaDB
         if len(batch_ids) >= 50:
             try:
-                database.chroma_collection.add(
+                write_fn = database.chroma_collection.upsert if incremental else database.chroma_collection.add
+                write_fn(
                     ids=batch_ids, documents=batch_docs, metadatas=batch_metas,
                 )
-                logger.info("[SemanticInit] 批量写入 ChromaDB {} 只", len(batch_ids))
+                logger.info("[SemanticInit] 批量写入 ChromaDB {} 只 ({})", len(batch_ids), mode_label)
+                # 增量模式：回写 PG biz_text_updated_at
+                if incremental:
+                    _update_biz_timestamp(batch_ids)
             except Exception as e:
                 logger.error("[SemanticInit] ChromaDB 写入失败: {}", e)
             batch_ids.clear()
@@ -261,16 +308,42 @@ def run() -> dict:
     # 写入剩余
     if batch_ids:
         try:
-            database.chroma_collection.add(
+            write_fn = database.chroma_collection.upsert if incremental else database.chroma_collection.add
+            write_fn(
                 ids=batch_ids, documents=batch_docs, metadatas=batch_metas,
             )
-            logger.info("[SemanticInit] 最终批量写入 {} 只", len(batch_ids))
+            logger.info("[SemanticInit] 最终批量写入 {} 只 ({})", len(batch_ids), mode_label)
+            if incremental:
+                _update_biz_timestamp(batch_ids)
         except Exception as e:
             logger.error("[SemanticInit] 最终批次写入失败: {}", e)
 
     logger.info(
-        "[SemanticInit] ===== 完成 ===== 总计 {} | 成功 {} | 失败 {} | 概念分类 {} | ChromaDB 总量 {}",
+        "[SemanticInit] ===== 完成 ({}) ===== 总计 {} | 成功 {} | 失败 {} | 概念分类 {} | ChromaDB 总量 {}",
+        mode_label,
         stats["total"], stats["success"], stats["failed"],
         stats["concept_classified"], database.chroma_collection.count(),
     )
     return stats
+
+
+def _update_biz_timestamp(ts_codes: list[str]) -> None:
+    """批量回写 PG stock_basic.biz_text_updated_at = NOW()"""
+    if not ts_codes:
+        return
+    try:
+        import psycopg2 as _pg2
+        from config.settings import settings as _settings
+        conn = _pg2.connect(_settings.pg_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stock_basic SET biz_text_updated_at = NOW() WHERE ts_code = ANY(%s)",
+                    (ts_codes,)
+                )
+            conn.commit()
+            logger.debug("[SemanticInit] 回写 biz_text_updated_at {} 只", len(ts_codes))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("[SemanticInit] 回写 biz_text_updated_at 失败: {}", e)

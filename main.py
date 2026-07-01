@@ -31,9 +31,13 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # ── 可观测性：JSON 日志 sink ───────────────────────────────────────────────
 def _setup_obs_logger() -> None:
-    """添加 JSON 文件 sink，仅记录 bind(event_type=...) 的结构化日志"""
-    import datetime as _dt
+    """添加 JSON 文件 sink，仅记录 bind(event_type=...) 的结构化日志。
 
+    自动运维策略：
+      - rotation:   单文件 >100MB 自动切割
+      - retention:  仅保留最近 30 天
+      - compression: 过期文件自动 zip 压缩
+    """
     logs_dir = PROJECT_ROOT / "logs"
     logs_dir.mkdir(exist_ok=True)
 
@@ -55,13 +59,26 @@ def _setup_obs_logger() -> None:
                   "data_type", "failed_source", "fallback_source", "reason"):
             if k in extra:
                 entry[k] = extra[k]
-        with open(logs_dir / f"app_{_dt.date.today().isoformat()}.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        record["extra"]["_json_entry"] = entry
+        import json as _json
+        record["extra"]["_json_line"] = _json.dumps(entry, ensure_ascii=False)
 
     logger.add(
         _json_sink,
         filter=lambda r: r["extra"].get("event_type"),
         level="DEBUG",
+        enqueue=True,
+    )
+
+    # 结构化 JSON 文件 sink —— loguru 内置 rotation / retention / compression
+    logger.add(
+        str(logs_dir / "app_{time:YYYY-MM-DD}.log"),
+        format="{extra[_json_line]}",
+        filter=lambda r: r["extra"].get("_json_line"),
+        level="DEBUG",
+        rotation="100 MB",
+        retention="30 days",
+        compression="zip",
         enqueue=True,
     )
 

@@ -197,6 +197,78 @@ def get_today_alerts():
     return {"date": today, "count": len(parsed), "items": parsed, "redis": True}
 
 
+@app.get("/api/alerts/history")
+def get_alerts_history(
+    start_date: str = Query("", description="开始日期 YYYY-MM-DD"),
+    end_date: str = Query("", description="结束日期 YYYY-MM-DD"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+):
+    """查询历史预警信号（PostgreSQL 持久化数据）"""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        with conn.cursor() as cur:
+            # 构建 WHERE 条件
+            conditions = []
+            params: list = []
+            if start_date:
+                conditions.append("alert_time >= %s")
+                params.append(start_date)
+            if end_date:
+                conditions.append("alert_time < %s::timestamp + INTERVAL '1 day'")
+                params.append(end_date)
+
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+            # 总数
+            cur.execute(f"SELECT COUNT(*) FROM resonance_alerts WHERE {where_clause}", params)
+            total = cur.fetchone()[0]
+
+            # 分页查询
+            offset = (page - 1) * size
+            cur.execute(
+                f"""SELECT id, alert_time, ts_code, name, concept,
+                           news_score, capital_inflow_pct, volume_ratio,
+                           confidence, reason, created_at
+                    FROM resonance_alerts
+                    WHERE {where_clause}
+                    ORDER BY alert_time DESC
+                    LIMIT %s OFFSET %s""",
+                params + [size, offset],
+            )
+            rows = cur.fetchall()
+
+            items = []
+            for row in rows:
+                items.append({
+                    "id": row[0],
+                    "alert_time": row[1].isoformat() if row[1] else None,
+                    "ts_code": row[2],
+                    "name": row[3],
+                    "concept": row[4],
+                    "news_score": row[5],
+                    "capital_inflow_pct": row[6],
+                    "volume_ratio": row[7],
+                    "confidence": row[8],
+                    "reason": row[9],
+                    "created_at": row[10].isoformat() if row[10] else None,
+                })
+
+            return {
+                "total": total,
+                "page": page,
+                "size": size,
+                "items": items,
+            }
+    except Exception as e:
+        logger.warning("[API] 历史预警查询失败: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            release_pg_conn(conn)
+
+
 # ── 简易审核页面 ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)

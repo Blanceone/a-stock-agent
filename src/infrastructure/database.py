@@ -90,6 +90,22 @@ CREATE TABLE IF NOT EXISTS concept_stocks (
 );
 CREATE INDEX IF NOT EXISTS idx_concept_stocks_concept ON concept_stocks(concept);
 CREATE INDEX IF NOT EXISTS idx_concept_stocks_code ON concept_stocks(ts_code);
+
+CREATE TABLE IF NOT EXISTS resonance_alerts (
+    id SERIAL PRIMARY KEY,
+    alert_time          TIMESTAMP    NOT NULL,
+    ts_code             VARCHAR(10)  NOT NULL,
+    name                VARCHAR(20),
+    concept             VARCHAR(50),
+    news_score          FLOAT,
+    capital_inflow_pct  FLOAT,
+    volume_ratio        FLOAT,
+    confidence          FLOAT,
+    reason              TEXT,
+    created_at          TIMESTAMP    DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_time ON resonance_alerts(alert_time DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_code ON resonance_alerts(ts_code);
 """
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────

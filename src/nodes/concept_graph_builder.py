@@ -10,6 +10,7 @@ concept_graph_builder.py — 政策驱动概念图谱构建引擎
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections import deque
@@ -731,7 +732,7 @@ def incremental_insert(new_terms: list[str], news_result: dict | None = None) ->
     """
     将新闻发现的新概念增量插入到已有图谱中。
 
-    流程：检查图谱是否存在 → LLM 评估定位 → 写入边 → 有限展开
+    流程：检查图谱是否存在 → Redis NX 防抖锁 → LLM 评估定位 → 写入边 → 有限展开
     """
     if not new_terms:
         return {"status": "skipped", "reason": "无新概念"}
@@ -765,6 +766,23 @@ def incremental_insert(new_terms: list[str], news_result: dict | None = None) ->
 
     if not terms_to_insert:
         return {"status": "skipped", "reason": "所有概念已在图谱中"}
+
+    # ── 短期去重锁（防抖） ──────────────────────────────────────
+    # 同一概念在 TTL 内仅处理一次，避免多源重复报道浪费 Token
+    locked_terms: list[str] = []
+    for term in terms_to_insert:
+        term_md5 = hashlib.md5(term.encode("utf-8")).hexdigest()
+        lock_key = f"concept_graph:insert_lock:{term_md5}"
+        acquired = redis_client.set(lock_key, "1", nx=True, ex=3600)
+        if acquired:
+            locked_terms.append(term)
+        else:
+            logger.info("[ConceptGraph] 防抖锁命中，跳过 '{}'", term)
+
+    if not locked_terms:
+        return {"status": "skipped", "reason": "所有概念命中防抖锁"}
+
+    terms_to_insert = locked_terms
 
     # LLM 批量评估定位
     graph_summary = _get_graph_concepts_summary()

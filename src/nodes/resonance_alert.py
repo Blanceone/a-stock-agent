@@ -24,7 +24,7 @@ from loguru import logger
 
 from config.settings import settings
 from src.infrastructure.data_fetcher import fetch_moneyflow_intraday
-from src.infrastructure.database import redis_client
+from src.infrastructure.database import get_pg_conn, release_pg_conn, redis_client
 from src.nodes.llm_utils import call_llm_json, load_prompt
 from src.tools.indicator_calc import calc_volume_ratio
 
@@ -125,6 +125,41 @@ def _fallback_judge(news_score: float, stock_data: list[dict]) -> list[dict]:
     return alerts
 
 
+def _pg_persist_alert(alerts: list[dict]) -> None:
+    """将预警信号异步持久化到 PostgreSQL resonance_alerts 表"""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        with conn.cursor() as cur:
+            for alert in alerts:
+                cur.execute(
+                    """INSERT INTO resonance_alerts
+                       (alert_time, ts_code, name, concept, news_score,
+                        capital_inflow_pct, volume_ratio, confidence, reason)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        datetime.fromtimestamp(alert.get("timestamp", time.time())),
+                        alert.get("ts_code", ""),
+                        alert.get("name", ""),
+                        alert.get("concept", ""),
+                        alert.get("news_score", 0),
+                        alert.get("capital_inflow_pct", 0),
+                        alert.get("volume_ratio", 0),
+                        alert.get("confidence", 0),
+                        alert.get("reason", ""),
+                    ),
+                )
+        conn.commit()
+        logger.debug("[resonance] {} 条预警已持久化到 PG", len(alerts))
+    except Exception as e:
+        logger.warning("[resonance] PG 预警持久化失败: {}", e)
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            release_pg_conn(conn)
+
+
 def run(state: dict) -> dict:
     news_result = state.get("news_result")
     if news_result is None:
@@ -190,6 +225,10 @@ def run(state: dict) -> dict:
             logger.debug("[resonance] {} 条预警已写入 Redis {}", len(alerts), key)
         except Exception as e:
             logger.warning("[resonance] Redis 写入失败: {}", e)
+
+    # 异步持久化到 PostgreSQL
+    if alerts:
+        _pg_persist_alert(alerts)
 
     return {
         "resonance_alerts": alerts,
